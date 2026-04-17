@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#060606">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Always">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/Always.png">
+<title>Always Player</title>
+<style>
+:root{
+  --bg:#060606; --bg2:#0e0e0e; --bg3:#161616; --bg4:#1e1e1e;
+  --border:#222; --border2:#2e2e2e;
+  --text:#d8d8d8; --text2:#5a5a5a; --text3:#2a2a2a;
+  --ac:#5aabee; --ac2:#836fd4;
+  --green:#3db87a; --yellow:#e8a020; --red:#d95050;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+html,body{
+  font-family:'Meiryo','メイリオ','Segoe UI',sans-serif;
+  background:var(--bg); color:var(--text);
+  min-height:100vh;
+  display:flex; align-items:center; justify-content:center;
+  padding:.75rem;
+}
+.player{
+  width:100%; max-width:400px;
+  background:var(--bg2);
+  border:1px solid var(--border); border-radius:22px;
+  padding:1rem 1.25rem 1.1rem;
+  display:flex; flex-direction:column; gap:.52rem;
+}
+
+/* ── ヘッダー */
+.header{display:flex;align-items:center;justify-content:space-between;}
+.logo{display:flex;align-items:center;gap:8px;}
+.logo-icon{
+  width:26px;height:26px;border-radius:50%;
+  background:linear-gradient(135deg,#5aabee,#836fd4);
+  display:flex;align-items:center;justify-content:center;
+}
+.logo-name{
+  font-size:15px;font-weight:500;letter-spacing:.1em;
+  background:linear-gradient(90deg,var(--ac),var(--ac2));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+}
+.device-badge{
+  font-size:9px;padding:2px 8px;border-radius:4px;
+  background:#0a1e2e;border:1px solid #1a405e;color:var(--ac);
+  cursor:pointer;transition:all .15s;white-space:nowrap;
+}
+.device-badge:hover{border-color:var(--ac);}
+
+/* ── デバイスパネル */
+.device-panel{
+  background:var(--bg3);border:1px solid var(--border2);
+  border-radius:10px;padding:8px;display:none;
+}
+.device-panel.open{display:block;}
+.device-title{font-size:9px;color:var(--text3);letter-spacing:.06em;text-transform:uppercase;margin-bottom:5px;}
+.device-list{display:flex;flex-direction:column;gap:4px;}
+.device-item{
+  background:var(--bg4);border:1px solid var(--border);
+  border-radius:6px;padding:6px 10px;cursor:pointer;
+  display:flex;align-items:center;justify-content:space-between;transition:all .15s;
+}
+.device-item:hover{border-color:var(--border2);}
+.device-item.active{background:#0a1e2e;border-color:var(--ac);}
+.device-item-name{font-size:11px;color:var(--text2);}
+.device-item.active .device-item-name{color:var(--ac);}
+.device-item-tag{font-size:9px;color:var(--text3);}
+
+/* ── ディスプレイエリア（ジャケット／VU切替） */
+.display-wrap{
+  width:100%;height:160px;
+  border-radius:14px;overflow:hidden;
+  background:#040404;border:1px solid var(--border);
+  box-shadow:0 4px 24px rgba(0,0,0,.6);
+  flex-shrink:0;
+}
+
+/* VUメーター */
+.vu-view{
+  width:100%;height:100%;
+  background:#030303;
+  display:flex;flex-direction:column;
+  align-items:center;justify-content:center;
+  gap:6px;padding:12px 16px 8px;
+}
+.vu-label{font-size:8px;letter-spacing:.22em;color:#112233;text-transform:uppercase;}
+.vu-meters{display:flex;gap:12px;width:100%;}
+.vu-ch{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;}
+.vu-ch-label{font-size:8px;letter-spacing:.15em;color:#112233;}
+.vu-canvas-wrap{position:relative;width:100%;height:72px;}
+.vu-canvas-wrap canvas{position:absolute;top:0;left:0;width:100%;height:100%;}
+.vu-db{font-size:9px;color:#1a4a7a;font-variant-numeric:tabular-nums;min-width:40px;text-align:center;}
+.vu-time-row{
+  display:flex;justify-content:space-between;width:100%;
+  font-size:9px;color:#112233;font-variant-numeric:tabular-nums;
+}
+
+/* ── 曲情報 */
+.track-info{text-align:center;}
+.track-title{
+  font-size:13px;font-weight:500;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  color:var(--text);margin-bottom:2px;
+}
+.track-sub{font-size:10px;color:var(--text2);}
+
+/* ── バッジ */
+.badge-row{display:flex;justify-content:center;gap:4px;flex-wrap:wrap;min-height:16px;}
+.badge{font-size:9px;padding:1px 6px;border-radius:3px;background:var(--bg3);border:1px solid var(--border2);color:var(--text2);}
+.badge.hi  {background:#0a2018;border-color:#1a5c36;color:var(--green);}
+.badge.info{background:#0a1e2e;border-color:#1a405e;color:var(--ac);}
+
+/* ── エラー */
+.err-box{
+  background:#1a0808;border:1px solid #4a1818;border-radius:8px;
+  color:var(--red);font-size:10px;padding:6px 10px;display:none;line-height:1.5;
+}
+
+/* ── 音質モード */
+.mode-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;}
+.mode-btn{
+  background:var(--bg3);border:1px solid var(--border);border-radius:6px;
+  color:var(--text2);font-size:10px;font-family:'Meiryo',sans-serif;
+  padding:5px 2px;cursor:pointer;text-align:center;transition:all .15s;
+  min-height:28px;display:flex;align-items:center;justify-content:center;
+}
+.mode-btn:hover{color:var(--text);border-color:var(--border2);}
+.mode-btn.active{background:#0a1e2e;border-color:var(--ac);color:var(--ac);}
+.mode-desc{font-size:9px;color:var(--text3);text-align:center;margin-top:2px;min-height:11px;}
+
+/* ── シークバー */
+.seek-wrap{}
+.seek-track{
+  position:relative;height:3px;background:var(--bg4);
+  border-radius:2px;cursor:pointer;margin-bottom:3px;border:1px solid var(--border);
+}
+.seek-fill{
+  position:absolute;left:0;top:0;height:100%;
+  background:linear-gradient(90deg,#2a7fd4,#5aabee,#82c8ff);
+  border-radius:2px;pointer-events:none;width:0%;
+}
+.seek-thumb{
+  position:absolute;top:50%;
+  width:11px;height:11px;
+  background:var(--ac);border:1.5px solid #fff;
+  border-radius:50%;transform:translate(-50%,-50%);
+  pointer-events:none;
+  box-shadow:0 0 6px rgba(90,171,238,.7);
+  left:0%;
+}
+.time-row{display:flex;justify-content:space-between;font-size:9px;color:var(--text3);font-variant-numeric:tabular-nums;}
+
+/* ── コントロール */
+.ctrl-area{display:flex;flex-direction:column;align-items:center;gap:7px;}
+.ctrl-main{display:flex;align-items:center;justify-content:center;gap:22px;}
+.skip-btn{
+  background:transparent;border:1px solid var(--border2);border-radius:50%;
+  width:36px;height:36px;cursor:pointer;color:var(--text2);
+  display:flex;align-items:center;justify-content:center;transition:all .15s;
+}
+.skip-btn:hover{background:var(--bg3);color:var(--text);border-color:#444;}
+.skip-btn:disabled{opacity:.2;cursor:default;}
+.play-btn{
+  width:64px;height:64px;border-radius:50%;
+  background:linear-gradient(145deg,#5aabee,#836fd4);
+  border:none;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 0 0 1px rgba(90,171,238,.3),0 0 20px rgba(90,171,238,.22),0 4px 12px rgba(0,0,0,.5);
+  transition:all .18s;flex-shrink:0;position:relative;
+}
+.play-btn::before{
+  content:'';position:absolute;inset:2px;border-radius:50%;
+  background:linear-gradient(145deg,rgba(255,255,255,.13),transparent);pointer-events:none;
+}
+.play-btn:hover{transform:scale(1.06);box-shadow:0 0 0 1px rgba(90,171,238,.5),0 0 28px rgba(90,171,238,.38),0 4px 16px rgba(0,0,0,.6);}
+.play-btn:active{transform:scale(.97);}
+.ctrl-sub{display:flex;gap:8px;}
+.sub-btn{
+  background:transparent;border:1px solid var(--border);border-radius:6px;
+  height:24px;padding:0 10px;cursor:pointer;color:var(--text2);
+  display:flex;align-items:center;justify-content:center;gap:4px;
+  font-size:10px;font-family:'Meiryo',sans-serif;transition:all .15s;white-space:nowrap;
+}
+.sub-btn:hover{background:var(--bg3);color:var(--text);border-color:var(--border2);}
+
+/* ── ボリューム */
+.vol-row{display:flex;align-items:center;gap:8px;}
+.vol-icon{color:var(--text2);flex-shrink:0;}
+input[type=range]{
+  -webkit-appearance:none;height:3px;border-radius:2px;
+  background:var(--bg4);outline:none;flex:1;cursor:pointer;border:1px solid var(--border);
+}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:12px;height:12px;border-radius:50%;
+  background:var(--ac);cursor:pointer;box-shadow:0 0 4px rgba(90,171,238,.5);
+}
+.vol-val{font-size:10px;color:var(--text2);min-width:24px;text-align:right;}
+
+/* ── ファイル操作 */
+.file-row{display:flex;gap:6px;}
+.file-btn{
+  flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:8px;
+  color:var(--text2);font-size:11px;font-family:'Meiryo',sans-serif;
+  padding:7px 0;cursor:pointer;transition:all .15s;
+}
+.file-btn:hover{background:var(--bg4);color:var(--text);border-color:var(--border2);}
+input[type=file]{display:none;}
+
+/* ── ステータス */
+.status-bar{
+  background:var(--bg3);border:1px solid var(--border);border-radius:8px;
+  font-size:10px;color:var(--text2);padding:5px 10px;
+  display:flex;justify-content:space-between;align-items:center;
+}
+.status-left{display:flex;align-items:center;gap:5px;}
+.dot{width:5px;height:5px;border-radius:50%;background:var(--text3);transition:background .4s;}
+.dot.playing{background:var(--green);box-shadow:0 0 4px var(--green);}
+.dot.paused{background:var(--yellow);}
+
+/* ── プレイリスト */
+.playlist{
+  max-height:120px;overflow-y:auto;border:1px solid var(--border);
+  border-radius:8px;display:none;
+  scrollbar-width:thin;scrollbar-color:var(--border2) transparent;
+}
+.pl-item{
+  padding:6px 10px;font-size:11px;color:var(--text2);cursor:pointer;
+  border-bottom:1px solid var(--border);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  display:flex;align-items:center;gap:6px;transition:background .1s;
+}
+.pl-item:last-child{border-bottom:none;}
+.pl-item:hover{background:var(--bg3);color:var(--text);}
+.pl-item.active{color:var(--ac);background:#0a1e2e;}
+.pl-num{color:var(--text3);font-size:9px;min-width:16px;flex-shrink:0;}
+
+@media(max-width:440px){
+  body{padding:.5rem;align-items:flex-start;padding-top:env(safe-area-inset-top,.5rem);}
+  .player{border-radius:16px;}
+  .skip-btn{width:42px;height:42px;}
+  .play-btn{width:68px;height:68px;}
+  .display-wrap{height:150px;}
+}
+</style>
+</head>
+<body>
+<div class="player">
+
+  <div class="header">
+    <div class="logo">
+      <div class="logo-icon">
+        <svg width="11" height="11" viewBox="0 0 11 11" fill="white"><polygon points="1,0 1,11 10,5.5"/></svg>
+      </div>
+      <span class="logo-name">Always</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+      <span class="device-badge" id="deviceBadge">WASAPI排他</span>
+      <button onclick="fetch('/api/quit',{method:'POST'}).catch(()=>{}).finally(()=>window.close())" style="font-size:10px;padding:2px 8px;border-radius:4px;background:#1a0808;border:1px solid #4a1818;color:#d95050;cursor:pointer;font-family:'Meiryo',sans-serif;">Close</button>
+    </div>
+  </div>
+
+  <div class="device-panel" id="devicePanel">
+    <div class="device-title">出力デバイス</div>
+    <div class="device-list" id="deviceList"></div>
+  </div>
+
+  <!-- VUメーター -->
+  <div class="display-wrap">
+    <div class="vu-view" id="vuView">
+      <div class="vu-label">VU Meter</div>
+      <div class="vu-meters">
+        <div class="vu-ch">
+          <div class="vu-ch-label">L</div>
+          <div class="vu-canvas-wrap"><canvas id="cvL"></canvas></div>
+          <div class="vu-db" id="dbL">— dB</div>
+        </div>
+        <div class="vu-ch">
+          <div class="vu-ch-label">R</div>
+          <div class="vu-canvas-wrap"><canvas id="cvR"></canvas></div>
+          <div class="vu-db" id="dbR">— dB</div>
+        </div>
+      </div>
+      <div class="vu-time-row">
+        <span id="vuTCur">0:00</span>
+        <span id="vuTTotal">—:——</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="track-info">
+    <div class="track-title" id="trackTitle">— ファイルを読み込んでください —</div>
+    <div class="track-sub" id="trackSub"></div>
+  </div>
+
+  <div class="badge-row" id="badgeRow"></div>
+  <div class="err-box" id="errBox"></div>
+
+  <div>
+    <div class="mode-grid" id="modeGrid"></div>
+    <div class="mode-desc" id="modeDesc"></div>
+  </div>
+
+  <div class="seek-wrap" id="seekWrap">
+    <div class="seek-track" id="seekTrack">
+      <div class="seek-fill" id="seekFill"></div>
+      <div class="seek-thumb" id="seekThumb"></div>
+    </div>
+    <div class="time-row"><span id="tCur">0:00</span><span id="tTotal">—:——</span></div>
+  </div>
+
+  <div class="ctrl-area">
+    <div class="ctrl-main">
+      <button class="skip-btn" id="prevBtn" disabled>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/>
+        </svg>
+      </button>
+      <button class="play-btn" id="playBtn">
+        <svg id="iconPlay" width="24" height="24" viewBox="0 0 24 24" fill="white"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+        <svg id="iconPause" width="24" height="24" viewBox="0 0 24 24" fill="white" style="display:none">
+          <rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>
+        </svg>
+      </button>
+      <button class="skip-btn" id="nextBtn" disabled>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/>
+        </svg>
+      </button>
+    </div>
+    <div class="ctrl-sub">
+      <button class="sub-btn" id="pauseBtn">
+        <svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+        一時停止
+      </button>
+      <button class="sub-btn" id="stopBtn">
+        <svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+        停止
+      </button>
+    </div>
+  </div>
+
+  <div class="vol-row">
+    <svg class="vol-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+      <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+    </svg>
+    <input type="range" id="volSlider" min="0" max="100" value="100" step="1">
+    <span class="vol-val" id="volVal">100</span>
+  </div>
+
+  <div class="file-row">
+    <button class="file-btn" id="folderBtn">フォルダ選択</button>
+    <button class="file-btn" id="playlistBtn">プレイリスト</button>
+  </div>
+  <input type="file" id="folderInput" webkitdirectory multiple
+    accept=".mp3,.aac,.ogg,.wav,.flac,.opus,.dsf,.dff,.m4a,.aiff,.wv">
+
+  <div class="status-bar">
+    <div class="status-left">
+      <div class="dot" id="dot"></div>
+      <span id="statusText">停止中</span>
+    </div>
+    <span id="infoCount">曲数: 0</span>
+  </div>
+
+  <div class="playlist" id="playlistEl"></div>
+
+</div>
+<script>
+if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
+
+const API='http://127.0.0.1:8765/api';
+let state={}, playlistNames=[], currentMode='hires4', currentDevice='wasapi/default';
+let seekDur=0, seekPos=0, seekRaf, devicePanelOpen=false;
+let vuTimer=null, levelL=0.05, levelR=0.05, velL=0, velR=0, vuT=0;
+const MODES_ORDER=['pure','hires4','dsd8','loudness','hp_soft','hp_strong'];
+const $=id=>document.getElementById(id);
+
+// ── VUメーター描画
+const SCALE=[
+  {db:-20,pos:0.00},{db:-10,pos:0.25},{db:-7,pos:0.40},
+  {db:-5,pos:0.52},{db:-3,pos:0.63},{db:-1,pos:0.75},
+  {db:0,pos:0.83},{db:1,pos:0.90},{db:3,pos:1.00}
+];
+function dbToPos(db){
+  if(db<=-20) return 0; if(db>=3) return 1;
+  for(let i=0;i<SCALE.length-1;i++){
+    const a=SCALE[i],b=SCALE[i+1];
+    if(db>=a.db&&db<=b.db){ const t=(db-a.db)/(b.db-a.db); return a.pos+(b.pos-a.pos)*t; }
+  }
+  return 0;
+}
+function drawVU(canvas, level){
+  const dpr=window.devicePixelRatio||1;
+  const W=canvas.offsetWidth,H=canvas.offsetHeight;
+  if(!W||!H) return;
+  if(canvas.width!==W*dpr||canvas.height!==H*dpr){ canvas.width=W*dpr; canvas.height=H*dpr; }
+  const ctx=canvas.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,W,H);
+  const cx=W/2,cy=H*0.92,R=H*0.86;
+  const sa=-Math.PI*0.82, ea=-Math.PI*0.18, sw=ea-sa;
+  const STICKS=32;
+  for(let i=0;i<STICKS;i++){
+    const t=i/(STICKS-1);
+    const angle=sa+sw*t;
+    const cosA=Math.cos(angle),sinA=Math.sin(angle);
+    const inner=R*0.52,outer=R*0.86;
+    const x1=cx+cosA*inner,y1=cy+sinA*inner;
+    const x2=cx+cosA*outer,y2=cy+sinA*outer;
+    const db=-20+t*23;
+    const active=t<=level;
+    let color;
+    if(!active){ color='#0c1820'; }
+    else if(db>=3){ color=`rgba(220,55,55,${0.7+t*0.3})`; }
+    else if(db>=0){ const b=160+t*60; color=`rgba(40,${b},255,0.92)`; }
+    else { const b=120+t*90; color=`rgba(20,${b},255,${0.45+t*0.55})`; }
+    ctx.save();
+    if(active){
+      ctx.shadowColor=db>=3?'rgba(255,60,60,0.85)':'rgba(50,150,255,0.95)';
+      ctx.shadowBlur=active?7:0;
+    }
+    ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);
+    ctx.strokeStyle=color;
+    ctx.lineWidth=i%4===0?2.0:1.1;
+    ctx.lineCap='round';ctx.stroke();
+    ctx.restore();
+  }
+  // 目盛ラベル
+  ctx.font=`${Math.max(8,H*0.12)}px 'Meiryo',monospace`;
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  SCALE.forEach(s=>{
+    const angle=sa+sw*s.pos;
+    const lr=R*0.38;
+    const x=cx+Math.cos(angle)*lr,y=cy+Math.sin(angle)*lr;
+    ctx.fillStyle=s.db>=1?'#2a0a0a':s.db>=0?'#0a1a2e':'#0a1520';
+    ctx.fillText(s.label,x,y);
+  });
+  // 針
+  const na=sa+sw*level;
+  ctx.save();
+  ctx.shadowColor='rgba(140,210,255,0.98)';ctx.shadowBlur=9;
+  ctx.beginPath();
+  ctx.moveTo(cx,cy);
+  ctx.lineTo(cx+Math.cos(na)*R*0.78,cy+Math.sin(na)*R*0.78);
+  ctx.strokeStyle='rgba(190,235,255,0.96)';
+  ctx.lineWidth=1.3;ctx.lineCap='round';ctx.stroke();
+  ctx.restore();
+  // 軸
+  ctx.beginPath();ctx.arc(cx,cy,3,0,Math.PI*2);
+  ctx.fillStyle='rgba(120,190,255,0.9)';
+  ctx.shadowColor='rgba(80,160,255,0.8)';ctx.shadowBlur=5;
+  ctx.fill();
+}
+
+// ── VUアニメーション
+function startVU(){
+  stopVU();
+  function tick(){
+    vuT+=0.04;
+    if(state.is_playing){
+      const tL=0.45+Math.sin(vuT*1.3)*0.22+Math.sin(vuT*2.7)*0.1+(Math.random()-.5)*0.08;
+      const tR=0.43+Math.sin(vuT*1.1+.5)*0.22+Math.sin(vuT*3.1)*0.1+(Math.random()-.5)*0.08;
+      velL+=(Math.max(.05,Math.min(1,tL))-levelL)*0.35; velL*=0.72;
+      velR+=(Math.max(.05,Math.min(1,tR))-levelR)*0.35; velR*=0.72;
+    } else {
+      velL+=(.05-levelL)*0.2; velL*=0.75;
+      velR+=(.05-levelR)*0.2; velR*=0.75;
+    }
+    levelL=Math.max(0,Math.min(1,levelL+velL));
+    levelR=Math.max(0,Math.min(1,levelR+velR));
+    const cvL=$('cvL'),cvR=$('cvR');
+    if(cvL&&cvR){ drawVU(cvL,levelL); drawVU(cvR,levelR); }
+    const toDb=l=>Math.round(-20+l*23);
+    const dL=toDb(levelL),dR=toDb(levelR);
+    $('dbL').textContent=(dL>0?'+':'')+dL+' dB';
+    $('dbR').textContent=(dR>0?'+':'')+dR+' dB';
+    $('dbL').style.color=dL>=3?'#cc3333':dL>=0?'#3a80cc':'#1a4a7a';
+    $('dbR').style.color=dR>=3?'#cc3333':dR>=0?'#3a80cc':'#1a4a7a';
+    $('vuTCur').textContent=$('tCur').textContent;
+    $('vuTTotal').textContent=$('tTotal').textContent;
+    vuTimer=setTimeout(tick,60);
+  }
+  tick();
+}
+function stopVU(){ clearTimeout(vuTimer); vuTimer=null; }
+
+// ── ユーティリティ
+const fmtTime=s=>!isFinite(s)||s<0?'0:00':`${Math.floor(s/60)}:${('0'+Math.floor(s%60)).slice(-2)}`;
+const showErr=msg=>{ const b=$('errBox');b.style.display=msg?'block':'none';b.textContent=msg||''; };
+const clearBadges=()=>$('badgeRow').innerHTML='';
+const addBadge=(t,c)=>{ const b=document.createElement('span');b.className='badge '+(c||'');b.textContent=t;$('badgeRow').appendChild(b); };
+
+// ── シーク
+function setSeek(pct){ const p=Math.max(0,Math.min(100,pct));$('seekFill').style.width=p+'%';$('seekThumb').style.left=p+'%'; }
+function tickSeek(){
+  if(!state.is_playing||seekDur<=0){seekRaf=null;return;}
+  seekPos=Math.min(seekPos+0.05,seekDur);
+  setSeek(seekPos/seekDur*100);$('tCur').textContent=fmtTime(seekPos);
+  seekRaf=setTimeout(tickSeek,50);
+}
+function startSeek(){clearTimeout(seekRaf);seekRaf=setTimeout(tickSeek,50);}
+function stopSeek(){clearTimeout(seekRaf);seekRaf=null;}
+$('seekTrack').onclick=e=>{
+  if(!seekDur) return;
+  const r=$('seekTrack').getBoundingClientRect();
+  const pct=(e.clientX-r.left)/r.width;
+  seekPos=seekDur*pct;setSeek(pct*100);$('tCur').textContent=fmtTime(seekPos);
+  api('/seek',{seconds:seekPos});
+};
+
+// ── API
+async function api(path,body){
+  try{
+    const r=await fetch(API+path,{
+      method:body!==undefined?'POST':'GET',
+      headers:{'Content-Type':'application/json'},
+      body:body!==undefined?JSON.stringify(body):undefined
+    });
+    return await r.json();
+  }catch(e){return{error:'サーバーに接続できません。'};}
+}
+
+// ── MediaSession
+function setupMediaSession(title){
+  if(!('mediaSession' in navigator)) return;
+  navigator.mediaSession.metadata=new MediaMetadata({title,artist:'Always Player'});
+  navigator.mediaSession.setActionHandler('play',()=>api('/resume',{}));
+  navigator.mediaSession.setActionHandler('pause',()=>api('/pause',{}));
+  navigator.mediaSession.setActionHandler('previoustrack',()=>api('/prev',{}));
+  navigator.mediaSession.setActionHandler('nexttrack',()=>api('/next',{}));
+}
+
+// ── デバイスパネル
+async function loadDevices(){
+  const devices=await api('/devices');
+  if(devices.error||!Array.isArray(devices)) return;
+  const list=$('deviceList');list.innerHTML='';
+  devices.forEach(d=>{
+    const item=document.createElement('div');
+    item.className='device-item'+(d.id===currentDevice?' active':'');
+    item.innerHTML=`<span class="device-item-name">${d.name}</span><span class="device-item-tag">${d.exclusive?'排他':'共有'}</span>`;
+    item.onclick=async()=>{
+      currentDevice=d.id;
+      document.querySelectorAll('.device-item').forEach(el=>el.classList.remove('active'));
+      item.classList.add('active');
+      await api('/device',{device:d.id,exclusive:d.exclusive});
+      $('deviceBadge').textContent=d.exclusive?'WASAPI排他':'WASAPI共有';
+      toggleDevicePanel();
+    };
+    list.appendChild(item);
+  });
+}
+function toggleDevicePanel(){
+  devicePanelOpen=!devicePanelOpen;
+  $('devicePanel').classList.toggle('open',devicePanelOpen);
+  if(devicePanelOpen) loadDevices();
+}
+$('deviceBadge').onclick=e=>{e.stopPropagation();toggleDevicePanel();};
+
+// ── モード
+function buildModeGrid(modes){
+  const g=$('modeGrid');g.innerHTML='';
+  MODES_ORDER.forEach(key=>{
+    if(!modes[key]) return;
+    const btn=document.createElement('button');
+    btn.className='mode-btn'+(key===currentMode?' active':'');
+    btn.textContent=modes[key].label;btn.dataset.mode=key;
+    btn.onclick=async()=>{
+      currentMode=key;
+      document.querySelectorAll('.mode-btn').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');$('modeDesc').textContent=modes[key].desc;
+      const res=await api('/mode',{mode:key});
+      if(res.error) showErr(res.error);
+    };
+    g.appendChild(btn);
+  });
+  if(modes[currentMode]) $('modeDesc').textContent=modes[currentMode].desc;
+}
+
+// ── ステータス
+async function updateStatus(){
+  const s=await api('/status');
+  if(s.error){showErr(s.error);return;}
+  const wasPlaying=state.is_playing;state=s;
+  $('iconPlay').style.display=s.is_playing?'none':'';
+  $('iconPause').style.display=s.is_playing?'':'none';
+  const dot=$('dot');
+  dot.className='dot'+(s.is_playing?' playing':s.paused?' paused':'');
+  $('statusText').textContent=s.is_playing?'再生中':s.paused?'一時停止':'停止中';
+  if(s.current_file){
+    const title=s.current_file.replace(/\.[^.]+$/,'');
+    $('trackTitle').textContent=title;
+    $('trackSub').textContent=`${s.current_index+1}  /  ${s.total}`;
+    if(s.is_playing) setupMediaSession(title);
+    if(!wasPlaying&&s.is_playing){seekPos=0;setSeek(0);$('tCur').textContent='0:00';$('tTotal').textContent='—:——';}
+
+  }
+  clearBadges();
+  if(s.current_file) addBadge(s.current_file.split('.').pop().toUpperCase(),'hi');
+  if(s.mode&&s.mode!=='pure') addBadge(s.mode_label,'info');
+  addBadge(s.audio_label,'info');
+  $('deviceBadge').textContent=s.audio_label||'—';
+  $('infoCount').textContent='曲数: '+s.total;
+  currentMode=s.mode||'hires4';currentDevice=s.audio_device||'wasapi/default';
+  document.querySelectorAll('.mode-btn').forEach(b=>b.classList.toggle('active',b.dataset.mode===currentMode));
+  document.querySelectorAll('.pl-item').forEach((el,i)=>el.className='pl-item'+(i===s.current_index?' active':''));
+  if(s.is_playing&&!wasPlaying) startSeek();
+  if(!s.is_playing&&wasPlaying) stopSeek();
+  if(!s.is_playing&&!s.paused){seekPos=0;setSeek(0);}
+}
+
+async function syncPosition(){
+  if(!state.is_playing) return;
+  const p=await api('/position');
+  if(!p.error&&p.duration>0){
+    seekDur=p.duration;seekPos=p.position;
+    const t=fmtTime(seekDur);$('tTotal').textContent=t;
+    setSeek(seekPos/seekDur*100);$('tCur').textContent=fmtTime(seekPos);
+  }
+}
+
+// ── フォルダ選択
+async function selectFolder(){
+  const isQt=navigator.userAgent.includes('Qt')||window.qt;
+  if(isQt){
+    try{
+      const res=await fetch('/api/open_folder',{method:'POST'});
+      const data=await res.json();
+      if(data.ok){
+        currentFolderPath = data.folder_path || '';
+        playlistNames=data.playlist||[];buildPlaylistUI();$('infoCount').textContent='曲数: '+data.count;if(data.count>0){$('prevBtn').disabled=false;$('nextBtn').disabled=false;await api('/play',{index:0});setTimeout(updateStatus,400);}
+      }
+      else if(data.error) showErr(data.error);
+    }catch(e){$('folderInput').click();}
+  } else {
+    $('folderInput').click();
+  }
+}
+
+$('folderInput').onchange=async e=>{
+  const files=Array.from(e.target.files);
+  if(!files.length) return;
+  showErr('');
+  const SUPPORTED=['.mp3','.aac','.ogg','.wav','.flac','.opus','.dsf','.dff','.m4a','.aiff','.wv'];
+  const supported=files.filter(f=>SUPPORTED.some(ext=>f.name.toLowerCase().endsWith(ext)));
+  const unsupported=files.filter(f=>!SUPPORTED.some(ext=>f.name.toLowerCase().endsWith(ext)));
+  if(!supported.length){showErr('対応フォーマットのファイルがありません');return;}
+  const formData=new FormData();
+  supported.forEach(f=>formData.append('files',f,f.webkitRelativePath||f.name));
+  try{
+    const r=await fetch(API+'/upload_files',{method:'POST',body:formData});
+    const res=await r.json();
+    if(res.error){showErr(res.error);return;}
+    playlistNames=res.playlist||[];buildPlaylistUI();
+    if(unsupported.length) showErr('再生できないファイル: '+unsupported.map(f=>f.name).join(', '));
+    $('infoCount').textContent='曲数: '+res.count;
+    if(res.count>0){$('prevBtn').disabled=false;$('nextBtn').disabled=false;await api('/play',{index:0});setTimeout(updateStatus,400);}
+  }catch(e){showErr('アップロードに失敗しました');}
+};
+
+function buildPlaylistUI(){
+  const el=$('playlistEl');el.innerHTML='';
+  playlistNames.forEach((name,i)=>{
+    const div=document.createElement('div');
+    div.className='pl-item'+(i===(state.current_index||0)?' active':'');
+    div.innerHTML=`<span class="pl-num">${i+1}</span>${name.replace(/\.[^.]+$/,'')}`;
+    div.onclick=async()=>{await api('/play',{index:i});setTimeout(updateStatus,400);};
+    el.appendChild(div);
+  });
+}
+
+$('playBtn').onclick  =async()=>{await api(state.is_playing?'/pause':'/resume',{});setTimeout(updateStatus,150);};
+$('pauseBtn').onclick =async()=>{await api('/pause',{});stopSeek();setTimeout(updateStatus,150);};
+$('stopBtn').onclick  =async()=>{
+  await api('/stop',{});stopSeek();
+  seekPos=0;setSeek(0);$('tCur').textContent='0:00';$('tTotal').textContent='—:——';
+  setTimeout(updateStatus,150);
+};
+$('prevBtn').onclick=async()=>{await api('/prev',{});seekPos=0;setSeek(0);setTimeout(updateStatus,400);};
+$('nextBtn').onclick=async()=>{await api('/next',{});seekPos=0;setSeek(0);setTimeout(updateStatus,400);};
+$('volSlider').oninput=e=>{$('volVal').textContent=e.target.value;api('/volume',{volume:+e.target.value});};
+// ── お気に入り管理（サーバー保存・クラッシュ耐性）
+let currentFolderPath = ''; // 現在のフォルダパス
+
+$('folderBtn').onclick=selectFolder;
+$('playlistBtn').onclick=()=>{const el=$('playlistEl');el.style.display=el.style.display==='block'?'none':'block';};
+
+(async()=>{
+  const modes=await api('/modes');
+  if(!modes.error) buildModeGrid(modes);
+  await updateStatus();       // ステータス取得
+  startVU();                  // VUメーター開始
+  setInterval(updateStatus,2000);
+  setInterval(syncPosition,1000);
+})();
+</script>
+</body>
+</html>

@@ -78,18 +78,33 @@ html,body{
   width:100%;height:160px;
   border-radius:14px;overflow:hidden;
   background:#040404;border:1px solid var(--border);
+  cursor:pointer;position:relative;
   box-shadow:0 4px 24px rgba(0,0,0,.6);
   flex-shrink:0;
 }
 
+/* ジャケット */
+.jacket-view{
+  position:absolute;inset:0;
+  display:flex;align-items:center;justify-content:center;
+  transition:opacity .3s;
+}
+.jacket-view img{width:100%;height:100%;object-fit:cover;}
+.no-art{color:var(--text3);font-size:10px;text-align:center;line-height:1.8;}
+.no-art canvas{display:block;margin:0 auto 2px;opacity:.35;}
+.jacket-view.hidden{opacity:0;pointer-events:none;}
+
 /* VUメーター */
 .vu-view{
-  width:100%;height:100%;
+  position:absolute;inset:0;
   background:#030303;
   display:flex;flex-direction:column;
   align-items:center;justify-content:center;
   gap:6px;padding:12px 16px 8px;
+  opacity:0;pointer-events:none;
+  transition:opacity .3s;
 }
+.vu-view.show{opacity:1;pointer-events:auto;}
 .vu-label{font-size:8px;letter-spacing:.22em;color:#112233;text-transform:uppercase;}
 .vu-meters{display:flex;gap:12px;width:100%;}
 .vu-ch{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;}
@@ -100,6 +115,12 @@ html,body{
 .vu-time-row{
   display:flex;justify-content:space-between;width:100%;
   font-size:9px;color:#112233;font-variant-numeric:tabular-nums;
+}
+
+/* 切替ヒント */
+.display-hint{
+  position:absolute;bottom:5px;right:8px;
+  font-size:8px;color:#1a1a1a;pointer-events:none;letter-spacing:.06em;
 }
 
 /* ── 曲情報 */
@@ -260,10 +281,7 @@ input[type=file]{display:none;}
       </div>
       <span class="logo-name">Always</span>
     </div>
-    <div style="display:flex;align-items:center;gap:6px;">
-      <span class="device-badge" id="deviceBadge">WASAPI排他</span>
-      <button onclick="fetch('/api/quit',{method:'POST'}).catch(()=>{}).finally(()=>window.close())" style="font-size:10px;padding:2px 8px;border-radius:4px;background:#1a0808;border:1px solid #4a1818;color:#d95050;cursor:pointer;font-family:'Meiryo',sans-serif;">Close</button>
-    </div>
+    <span class="device-badge" id="deviceBadge">WASAPI排他</span>
   </div>
 
   <div class="device-panel" id="devicePanel">
@@ -271,9 +289,16 @@ input[type=file]{display:none;}
     <div class="device-list" id="deviceList"></div>
   </div>
 
-  <!-- VUメーター -->
-  <div class="display-wrap">
-    <div class="vu-view" id="vuView">
+  <!-- ジャケット／VUメーター（タップで切替） -->
+  <div class="display-wrap" id="displayWrap">
+    <div class="jacket-view hidden" id="jacketView">
+      <div class="no-art" id="noArt">
+        <canvas id="miniIcon" width="44" height="44"></canvas>
+        No artwork
+      </div>
+      <img id="jacketImg" style="display:none;width:100%;height:100%;object-fit:cover;" alt="">
+    </div>
+    <div class="vu-view show" id="vuView">
       <div class="vu-label">VU Meter</div>
       <div class="vu-meters">
         <div class="vu-ch">
@@ -292,6 +317,7 @@ input[type=file]{display:none;}
         <span id="vuTTotal">—:——</span>
       </div>
     </div>
+    <div class="display-hint">tap</div>
   </div>
 
   <div class="track-info">
@@ -358,7 +384,11 @@ input[type=file]{display:none;}
   <div class="file-row">
     <button class="file-btn" id="folderBtn">フォルダ選択</button>
     <button class="file-btn" id="playlistBtn">プレイリスト</button>
+    <button class="file-btn" id="favAddBtn" title="現在のフォルダをお気に入りに追加">★</button>
+    <button class="file-btn" id="favListBtn" title="お気に入り一覧">☆リスト</button>
   </div>
+  <!-- お気に入りパネル -->
+  <div id="favPanel" style="display:none;background:#111;border:1px solid #333;border-radius:6px;margin:4px 0;max-height:160px;overflow-y:auto;"></div>
   <input type="file" id="folderInput" webkitdirectory multiple
     accept=".mp3,.aac,.ogg,.wav,.flac,.opus,.dsf,.dff,.m4a,.aiff,.wv">
 
@@ -379,9 +409,20 @@ if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catc
 const API='http://127.0.0.1:8765/api';
 let state={}, playlistNames=[], currentMode='hires4', currentDevice='wasapi/default';
 let seekDur=0, seekPos=0, seekRaf, devicePanelOpen=false;
+let displayMode='vu';  // デフォルトVUメーター（ジャケットあれば自動切替）
 let vuTimer=null, levelL=0.05, levelR=0.05, velL=0, velR=0, vuT=0;
 const MODES_ORDER=['pure','hires4','dsd8','loudness','hp_soft','hp_strong'];
 const $=id=>document.getElementById(id);
+
+// ── ミニアイコン
+(()=>{
+  const c=$('miniIcon'),s=c.width,ctx=c.getContext('2d');
+  const g=ctx.createRadialGradient(s*.35,s*.3,0,s/2,s/2,s/2);
+  g.addColorStop(0,'#82c0f8'); g.addColorStop(.5,'#5aabee'); g.addColorStop(1,'#836fd4');
+  ctx.beginPath();ctx.arc(s/2,s/2,s/2,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();
+  ctx.beginPath();ctx.moveTo(s*.38,s*.27);ctx.lineTo(s*.38,s*.73);ctx.lineTo(s*.73,s*.5);
+  ctx.closePath();ctx.fillStyle='rgba(255,255,255,.88)';ctx.fill();
+})();
 
 // ── VUメーター描画
 const SCALE=[
@@ -492,6 +533,15 @@ function startVU(){
 }
 function stopVU(){ clearTimeout(vuTimer); vuTimer=null; }
 
+// ── 表示切替（タップ）
+$('displayWrap').onclick=()=>{
+  displayMode = displayMode==='jacket' ? 'vu' : 'jacket';
+  $('jacketView').classList.toggle('hidden', displayMode==='vu');
+  $('vuView').classList.toggle('show', displayMode==='vu');
+  $('seekWrap').style.display = displayMode==='jacket' ? '' : 'none';
+  if(displayMode==='vu') startVU(); else stopVU();
+};
+
 // ── ユーティリティ
 const fmtTime=s=>!isFinite(s)||s<0?'0:00':`${Math.floor(s/60)}:${('0'+Math.floor(s%60)).slice(-2)}`;
 const showErr=msg=>{ const b=$('errBox');b.style.display=msg?'block':'none';b.textContent=msg||''; };
@@ -585,6 +635,48 @@ function buildModeGrid(modes){
   if(modes[currentMode]) $('modeDesc').textContent=modes[currentMode].desc;
 }
 
+// ── ジャケット取得・表示
+let lastJacketFile = null;
+
+async function updateJacket(filename){
+  // 同じ曲なら再取得しない
+  if(filename && filename === lastJacketFile) return;
+  lastJacketFile = filename || null;
+
+  try{
+    const r = await fetch(API+'/jacket');
+    const d = await r.json();
+    const img = $('jacketImg');
+    const noArt = $('noArt');
+
+    if(d.ok && d.data){
+      // ジャケットあり → 画像表示・jacket初期表示
+      img.src = d.data;
+      img.style.display = 'block';
+      noArt.style.display = 'none';
+      displayMode = 'jacket';
+      $('jacketView').classList.remove('hidden');
+      $('vuView').classList.remove('show');
+      stopVU();
+    } else {
+      // ジャケットなし → VUメーター表示
+      img.src = '';
+      img.style.display = 'none';
+      noArt.style.display = 'flex';
+      displayMode = 'vu';
+      $('jacketView').classList.add('hidden');
+      $('vuView').classList.add('show');
+      startVU();
+    }
+  } catch(e){
+    // 取得失敗 → VUメーター
+    displayMode = 'vu';
+    $('jacketView').classList.add('hidden');
+    $('vuView').classList.add('show');
+    startVU();
+  }
+}
+
 // ── ステータス
 async function updateStatus(){
   const s=await api('/status');
@@ -601,7 +693,8 @@ async function updateStatus(){
     $('trackSub').textContent=`${s.current_index+1}  /  ${s.total}`;
     if(s.is_playing) setupMediaSession(title);
     if(!wasPlaying&&s.is_playing){seekPos=0;setSeek(0);$('tCur').textContent='0:00';$('tTotal').textContent='—:——';}
-
+    // 曲が変わったらジャケット更新
+    updateJacket(s.current_file);
   }
   clearBadges();
   if(s.current_file) addBadge(s.current_file.split('.').pop().toUpperCase(),'hi');
@@ -688,7 +781,83 @@ $('prevBtn').onclick=async()=>{await api('/prev',{});seekPos=0;setSeek(0);setTim
 $('nextBtn').onclick=async()=>{await api('/next',{});seekPos=0;setSeek(0);setTimeout(updateStatus,400);};
 $('volSlider').oninput=e=>{$('volVal').textContent=e.target.value;api('/volume',{volume:+e.target.value});};
 // ── お気に入り管理（サーバー保存・クラッシュ耐性）
+let favorites = [];        // {name, path} の配列
 let currentFolderPath = ''; // 現在のフォルダパス
+
+async function loadFavorites(){
+  try{
+    const r = await fetch(API+'/favorites');
+    const d = await r.json();
+    favorites = d.favorites || [];
+  }catch(e){ favorites=[]; }
+}
+
+async function saveFavoritesToServer(){
+  try{
+    await fetch(API+'/favorites',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({favorites})
+    });
+  }catch(e){ console.error('お気に入り保存失敗',e); }
+}
+
+function buildFavPanel(){
+  const panel = $('favPanel');
+  panel.innerHTML = '';
+  if(!favorites.length){
+    panel.innerHTML='<div style="color:#555;padding:8px;font-size:12px;">お気に入りはありません</div>';
+    return;
+  }
+  favorites.forEach((fav,i)=>{
+    const row = document.createElement('div');
+    row.style.cssText='display:flex;align-items:center;padding:6px 8px;border-bottom:1px solid #222;cursor:pointer;';
+    row.innerHTML=`<span style="flex:1;font-size:12px;color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${fav.name}</span>`
+      +`<button style="background:none;border:none;color:#f66;cursor:pointer;font-size:11px;padding:0 4px;" data-i="${i}">✕</button>`;
+    // フォルダ読み込み
+    row.querySelector('span').onclick = async()=>{
+      $('favPanel').style.display='none';
+      const res = await fetch(API+'/load_folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:fav.path})});
+      const data = await res.json();
+      if(data.ok){
+        currentFolderPath = fav.path;
+        playlistNames=data.playlist||[];buildPlaylistUI();
+        $('infoCount').textContent='曲数: '+data.count;
+        if(data.count>0){$('prevBtn').disabled=false;$('nextBtn').disabled=false;await api('/play',{index:0});setTimeout(updateStatus,400);}
+      } else if(data.error) showErr(data.error);
+    };
+    // 削除ボタン
+    row.querySelector('button').onclick=(e)=>{
+      e.stopPropagation();
+      favorites.splice(i,1);
+      saveFavoritesToServer();
+      buildFavPanel();
+    };
+    panel.appendChild(row);
+  });
+}
+
+$('favAddBtn').onclick = async()=>{
+  if(!currentFolderPath){ showErr('フォルダが選択されていません'); return; }
+  const name = currentFolderPath.split(/[\\/]/).filter(Boolean).pop() || currentFolderPath;
+  // 重複チェック
+  if(favorites.some(f=>f.path===currentFolderPath)){
+    showErr('すでにお気に入りに登録済みです'); return;
+  }
+  favorites.push({name, path:currentFolderPath});
+  await saveFavoritesToServer();  // 即時保存
+  showErr('★ お気に入りに追加: '+name);
+};
+
+$('favListBtn').onclick = ()=>{
+  const panel = $('favPanel');
+  if(panel.style.display==='none'){
+    buildFavPanel();
+    panel.style.display='block';
+  } else {
+    panel.style.display='none';
+  }
+};
 
 $('folderBtn').onclick=selectFolder;
 $('playlistBtn').onclick=()=>{const el=$('playlistEl');el.style.display=el.style.display==='block'?'none':'block';};
@@ -696,8 +865,9 @@ $('playlistBtn').onclick=()=>{const el=$('playlistEl');el.style.display=el.style
 (async()=>{
   const modes=await api('/modes');
   if(!modes.error) buildModeGrid(modes);
+  await loadFavorites();      // お気に入りをサーバーから復元
   await updateStatus();       // ステータス取得
-  startVU();                  // VUメーター開始
+  await updateJacket(null);   // 起動時：ジャケットあれば表示・なければVU
   setInterval(updateStatus,2000);
   setInterval(syncPosition,1000);
 })();

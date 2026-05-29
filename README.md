@@ -1,4 +1,36 @@
-# always-player
-High fidelity PC audio player for Windows
-![Main](main.png)
-![VU](vu.png)
+# Always Player v5.0.0
+
+**High Fidelity PC Audio Player for Windows**
+
+ハイレゾ・ビットパーフェクト対応の高音質Windowsミュージックプレーヤーです。
+
+---
+
+## 主な特長
+
+- **疑似DSD ×8 アップサンプリング**（352.8kHz）による高音質再生
+- **ビットパーフェクト出力**：44.1kHz/16bit〜384kHz/24bit まで16種類対応
+- **偶数次高調波付加**によるアナログライクな温かみのある音質
+- **アルバムアート表示** と **VUメーター**（クリックで切り替え）
+- **シークスライダー** と再生時間表示
+- **アルバムブラウザ**：ジャンル・アーティスト階層表示
+- シャッフル / リピート / スリープタイマー
+- お気に入り機能
+- 日本語ファイル名・パスに完全対応
+
+## 動作環境
+
+- Windows 10 / 11（64bit）
+- インストーラー形式（MSI）
+
+## 対応フォーマット
+
+FLAC / MP3 / AAC / M4A / WAV / OGG / OPUS / DSF / DFF
+
+## ダウンロード
+
+🔗 [公式サイト](https://always-player.sakuraweb.com/)
+
+## 開発者
+
+YOUICHI SAIJO

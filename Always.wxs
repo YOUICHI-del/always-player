@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+
+  <Product
+      Id="*"
+      Name="Always Player"
+      Language="1033"
+      Version="5.0.0.0"
+      Manufacturer="YOUICHI SAIJO"
+      UpgradeCode="A1B2C3D4-E5F6-47A8-9B10-112233445566">
+
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version is already installed." />
+
+    <Icon Id="AlwaysIcon.ico" SourceFile="$(var.SourceDir)\Always.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AlwaysIcon.ico" />
+
+    <UIRef Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+
+    <Feature Id="MainFeature" Title="Always Player" Level="1">
+      <ComponentGroupRef Id="AlwaysFiles" />
+      <ComponentGroupRef Id="PlatformsFiles" />
+      <ComponentGroupRef Id="StylesFiles" />
+      <ComponentGroupRef Id="ImageFormatsFiles" />
+      <ComponentGroupRef Id="IconEnginesFiles" />
+      <ComponentGroupRef Id="NetworkInfoFiles" />
+      <ComponentGroupRef Id="TlsFiles" />
+      <ComponentGroupRef Id="GenericFiles" />
+      <ComponentRef Id="AlwaysShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
+    </Feature>
+
+  </Product>
+
+  <Fragment>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Always Player">
+          <Directory Id="DIR_platforms" Name="platforms" />
+          <Directory Id="DIR_styles" Name="styles" />
+          <Directory Id="DIR_imageformats" Name="imageformats" />
+          <Directory Id="DIR_iconengines" Name="iconengines" />
+          <Directory Id="DIR_networkinformation" Name="networkinformation" />
+          <Directory Id="DIR_tls" Name="tls" />
+          <Directory Id="DIR_generic" Name="generic" />
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="AlwaysProgramMenu" Name="Always Player" />
+      </Directory>
+      <Directory Id="DesktopFolder" />
+    </Directory>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="AlwaysFiles" Directory="INSTALLFOLDER">
+      <Component Id="cmp_Always_exe" Guid="{4C6DE3CA-8A5C-48CE-9647-349BC828DFD3}">
+        <File Id="fil_Always_exe" KeyPath="yes" Source="$(var.SourceDir)\Always.exe" />
+      </Component>
+      <Component Id="cmp_libmpv" Guid="{D143CAF6-247B-4855-BA54-6679529BB86E}">
+        <File Id="fil_libmpv" KeyPath="yes" Source="$(var.SourceDir)\libmpv-2.dll" />
+      </Component>
+      <Component Id="cmp_tag_dll" Guid="{9678ED11-20CE-4BBD-8CDB-8008EEBF1617}">
+        <File Id="fil_tag_dll" KeyPath="yes" Source="$(var.SourceDir)\tag.dll" />
+      </Component>
+      <Component Id="cmp_zlib1_dll" Guid="{F1FFB8B9-FFCC-4547-B0E0-FC26657F7B1F}">
+        <File Id="fil_zlib1_dll" KeyPath="yes" Source="$(var.SourceDir)\zlib1.dll" />
+      </Component>
+      <Component Id="cmp_Qt6Core" Guid="{C638E0FA-71D0-4061-86A8-32FCA4A8A1AC}">
+        <File Id="fil_Qt6Core" KeyPath="yes" Source="$(var.SourceDir)\Qt6Core.dll" />
+      </Component>
+      <Component Id="cmp_Qt6Gui" Guid="{7AE3C13A-69FC-4A4D-BD19-FB640550ECC0}">
+        <File Id="fil_Qt6Gui" KeyPath="yes" Source="$(var.SourceDir)\Qt6Gui.dll" />
+      </Component>
+      <Component Id="cmp_Qt6Widgets" Guid="{1FFBCC3B-D883-466C-9DFB-EE938649FBF1}">
+        <File Id="fil_Qt6Widgets" KeyPath="yes" Source="$(var.SourceDir)\Qt6Widgets.dll" />
+      </Component>
+      <Component Id="cmp_Qt6Network" Guid="{B57E854A-FD8C-4B08-8D01-F8C4607821C1}">
+        <File Id="fil_Qt6Network" KeyPath="yes" Source="$(var.SourceDir)\Qt6Network.dll" />
+      </Component>
+      <Component Id="cmp_Qt6Svg" Guid="{2769CAA1-2A3A-4CC6-9895-E1AF5FCA175E}">
+        <File Id="fil_Qt6Svg" KeyPath="yes" Source="$(var.SourceDir)\Qt6Svg.dll" />
+      </Component>
+      <Component Id="cmp_d3dcompiler" Guid="{3293016B-C09A-4D62-98E8-25F0A35A1910}">
+        <File Id="fil_d3dcompiler" KeyPath="yes" Source="$(var.SourceDir)\d3dcompiler_47.dll" />
+      </Component>
+      <Component Id="cmp_opengl32sw" Guid="{EF9BFB53-E9BA-4B06-B3AF-6F88306472B7}">
+        <File Id="fil_opengl32sw" KeyPath="yes" Source="$(var.SourceDir)\opengl32sw.dll" />
+      </Component>
+      <Component Id="cmp_icuuc" Guid="{9B9DFF80-6255-4ED6-B53E-86AB2518153F}">
+        <File Id="fil_icuuc" KeyPath="yes" Source="$(var.SourceDir)\icuuc.dll" />
+      </Component>
+      <Component Id="cmp_msvcp140" Guid="{A1234567-0001-0001-0001-000000000001}">
+        <File Id="fil_msvcp140" KeyPath="yes" Source="$(var.SourceDir)\MSVCP140.dll" />
+      </Component>
+      <Component Id="cmp_vcruntime140" Guid="{A1234567-0001-0001-0001-000000000002}">
+        <File Id="fil_vcruntime140" KeyPath="yes" Source="$(var.SourceDir)\VCRUNTIME140.dll" />
+      </Component>
+      <Component Id="cmp_vcruntime140_1" Guid="{A1234567-0001-0001-0001-000000000003}">
+        <File Id="fil_vcruntime140_1" KeyPath="yes" Source="$(var.SourceDir)\VCRUNTIME140_1.dll" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="PlatformsFiles" Directory="DIR_platforms">
+      <Component Id="cmp_qwindows" Guid="{75610066-4812-4430-AF32-89396A92552C}">
+        <File Id="fil_qwindows" KeyPath="yes" Source="$(var.SourceDir)\platforms\qwindows.dll" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="StylesFiles" Directory="DIR_styles">
+      <Component Id="cmp_qstyle" Guid="{4FF3F775-6580-455A-83C4-0C487D3E0F6C}">
+        <File Id="fil_qstyle" KeyPath="yes" Source="$(var.SourceDir)\styles\qmodernwindowsstyle.dll" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="ImageFormatsFiles" Directory="DIR_imageformats">
+      <Component Id="cmp_qsvg" Guid="{3F82EF02-9F0B-471B-9D0C-15AEC4683194}">
+        <File Id="fil_qsvg" KeyPath="yes" Source="$(var.SourceDir)\imageformats\qsvg.dll" />
+      </Component>
+      <Component Id="cmp_qico" Guid="{4C624229-8AA9-4E14-AE31-7CA36A5A9AFB}">
+        <File Id="fil_qico" KeyPath="yes" Source="$(var.SourceDir)\imageformats\qico.dll" />
+      </Component>
+      <Component Id="cmp_qjpeg" Guid="{2DD256BD-DC9B-4E0B-9004-1F749BBA2904}">
+        <File Id="fil_qjpeg" KeyPath="yes" Source="$(var.SourceDir)\imageformats\qjpeg.dll" />
+      </Component>
+      <Component Id="cmp_qgif" Guid="{2B45D44D-EB74-4F7F-9DE0-8A605349EE6F}">
+        <File Id="fil_qgif" KeyPath="yes" Source="$(var.SourceDir)\imageformats\qgif.dll" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="IconEnginesFiles" Directory="DIR_iconengines">
+      <Component Id="cmp_qsvgicon" Guid="{8FA5942E-13FA-4118-BC16-ACD46CA3365F}">
+        <File Id="fil_qsvgicon" KeyPath="yes" Source="$(var.SourceDir)\iconengines\qsvgicon.dll" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="NetworkInfoFiles" Directory="DIR_networkinformation">
+      <Component Id="cmp_qnetwork" Guid="{F1DF7F05-B280-4644-AF14-C9747B097044}">
+        <File Id="fil_qnetwork" KeyPath="yes" Source="$(var.SourceDir)\networkinformation\qnetworklistmanager.dll" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="TlsFiles" Directory="DIR_tls">
+      <Component Id="cmp_qtls" Guid="{B9526FBD-D490-40A1-9272-FF22F47551E4}">
+        <File Id="fil_qtls" KeyPath="yes" Source="$(var.SourceDir)\tls\qschannelbackend.dll" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="GenericFiles" Directory="DIR_generic">
+      <Component Id="cmp_qtouch" Guid="{68388402-BF68-4C4D-BBCB-812748ABCF37}">
+        <File Id="fil_qtouch" KeyPath="yes" Source="$(var.SourceDir)\generic\qtuiotouchplugin.dll" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <Component Id="AlwaysShortcut" Guid="{A0B08527-EC2C-4607-B2D7-F271F295647A}" Directory="AlwaysProgramMenu">
+      <Shortcut Id="StartMenuShortcut"
+                Name="Always Player"
+                Target="[INSTALLFOLDER]Always.exe"
+                Icon="AlwaysIcon.ico" />
+      <RemoveFolder Id="RemoveShortcutFolder" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software\YOUICHI\AlwaysPlayer" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+  </Fragment>
+
+  <Fragment>
+    <Component Id="DesktopShortcut" Guid="{490FD831-4999-4593-B670-D50F42AC7434}" Directory="DesktopFolder">
+      <Shortcut Id="DesktopShortcutLink"
+                Name="Always Player"
+                Target="[INSTALLFOLDER]Always.exe"
+                Icon="AlwaysIcon.ico" />
+      <RemoveFolder Id="RemoveDesktopFolder" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software\YOUICHI\AlwaysPlayer" Name="desktop" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+  </Fragment>
+
+</Wix>

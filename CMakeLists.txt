@@ -62,3 +62,6 @@ add_custom_command(TARGET Always POST_BUILD
         "${MPV_LIB_DIR}/libmpv-2.dll"
         $<TARGET_FILE_DIR:Always>
 )
+# 一番下に追加
+string(TIMESTAMP BUILD_TIMESTAMP "%Y%m%d-%H%M")
+target_compile_definitions(Always PRIVATE BUILD_TIMESTAMP="${BUILD_TIMESTAMP}")

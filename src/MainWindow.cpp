@@ -211,7 +211,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
             }
         }
     });
-    m_infoTimer->start(1000);
+    m_infoTimer->start(1);
 
     loadFavorites();
 
@@ -738,9 +738,9 @@ void MainWindow::applyStyle()
         QSlider::groove:horizontal { height:3px; background:#181818; border-radius:2px; }
         QSlider::handle:horizontal { background:#3a8fe8; width:14px; height:14px; margin:-6px 0; border-radius:7px; }
         QSlider::sub-page:horizontal { background:#3a8fe8; border-radius:2px; }
-        QSlider#seekSlider::groove:horizontal { height:4px; background:#1a3a5a; border-radius:2px; }
-        QSlider#seekSlider::sub-page:horizontal { background:#3a8fe8; border-radius:2px; }
-        QSlider#seekSlider::handle:horizontal { width:12px; height:12px; margin:-4px 0; background:#6ab4ff; border-radius:6px; }
+        QSlider#seekSlider::groove:horizontal { height:3px; background:#222222; border-radius:2px; }
+        QSlider#seekSlider::sub-page:horizontal { background:#555555; border-radius:2px; }
+        QSlider#seekSlider::handle:horizontal { width:8px; height:8px; margin:-3px 0; background:#888888; border-radius:4px; }
         QLabel#timeLabel { color:#7a9fc0; font-size:11px; font-family:'Consolas'; }
         QLineEdit#searchBox { background:#0a0a0a; border:1px solid #1a2a3a; border-radius:6px; color:#aaaaaa; padding:4px 8px; height:28px; }
         QLineEdit#searchBox:focus { border-color:#3a8fe8; }
@@ -1424,7 +1424,7 @@ void MainWindow::showSettings()
     vl->addWidget(line);
 
     auto *aboutLabel = new QLabel(
-        "Always Player v5.0.0\n"
+        "Always Player v5.0.0 (build " BUILD_TIMESTAMP ")\n"
         "High Fidelity PC Audio Player\n\n"
         "(c) 2026 YOUICHI SAIJO  GPL-3.0");
     aboutLabel->setAlignment(Qt::AlignCenter);

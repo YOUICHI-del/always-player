@@ -1431,6 +1431,14 @@ void MainWindow::showSettings()
     aboutLabel->setObjectName("infoLabel");
     vl->addWidget(aboutLabel);
 
+    auto *urlLabel = new QLabel(
+        "<a href='https://always-player.sakuraweb.com/' "
+        "style='color:#4db8ff;'>always-player.sakuraweb.com</a>");
+    urlLabel->setOpenExternalLinks(true);
+    urlLabel->setAlignment(Qt::AlignCenter);
+    urlLabel->setObjectName("infoLabel");
+    vl->addWidget(urlLabel);
+
     // ── 閉じるボタン
     auto *closeBtn = new QPushButton(QString::fromUtf8("\xe9\x96\x89\xe3\x81\x98\xe3\x82\x8b"));
     closeBtn->setObjectName("toolBtn");
@@ -1470,7 +1478,8 @@ void MainWindow::showAbout()
 {
     QMessageBox::about(this, "Always Player v5.0.0",
         "Always Player v5.0.0\nHigh Fidelity PC Audio Player\n\n"
-        "(c) 2026 YOUICHI SAIJO -- GPL-3.0");
+        "(c) 2026 YOUICHI SAIJO -- GPL-3.0\n\n"
+        "https://always-player.sakuraweb.com/");
 }
 
 // ── フォルダ内の最初の音楽ファイルからタグ埋め込みアートを取得

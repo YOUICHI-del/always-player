@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Always VERSION 5.0.0 LANGUAGES CXX)
+project(Always VERSION 6.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,7 +7,6 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-# 汎用CPU向けビルド（Celeron等の低スペックPCにも対応）
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /arch:SSE2")
 
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
@@ -35,6 +34,13 @@ add_executable(Always WIN32
     src/UsbLatencyAnalyzer.cpp
     src/ClockSculptor.h
     src/ClockSculptor.cpp
+    src/CdDrive.h
+    src/CdDrive.cpp
+    src/RingBuffer.h
+    src/CDReader.h
+    src/CDReader.cpp
+    src/CdStreamWriter.h
+    src/CdStreamWriter.cpp
 )
 
 target_include_directories(Always PRIVATE
@@ -49,19 +55,11 @@ target_link_libraries(Always PRIVATE
     Qt6::Core
     Qt6::Widgets
     Qt6::Concurrent
-    "${MPV_LIB_DIR}/libmpv.dll.a"
     TagLib::tag
-    ole32
-    uuid
-    winhttp
-    powrprof
+    ${MPV_LIB_DIR}/libmpv.dll.a
+    winhttp.lib
+    powrprof.lib
+    winmm.lib
 )
 
-add_custom_command(TARGET Always POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${MPV_LIB_DIR}/libmpv-2.dll"
-        $<TARGET_FILE_DIR:Always>
-)
-# 一番下に追加
-string(TIMESTAMP BUILD_TIMESTAMP "%Y%m%d-%H%M")
-target_compile_definitions(Always PRIVATE BUILD_TIMESTAMP="${BUILD_TIMESTAMP}")
+target_compile_definitions(Always PRIVATE UNICODE _UNICODE)

@@ -5,7 +5,9 @@
     ]
   },
   "ExpandedNodes": [
-    ""
+    "",
+    "\\resources",
+    "\\src"
   ],
   "PreviewInSolutionExplorer": false
 }

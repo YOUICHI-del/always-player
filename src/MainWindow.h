@@ -12,9 +12,14 @@
 #include <QAction>
 #include <QScrollArea>
 #include <QGridLayout>
+#include <memory>
 #include "Player.h"
 #include "VUMeter.h"
 #include "TrayManager.h"
+#include "CdDrive.h"
+#include "CDReader.h"
+#include "CdStreamWriter.h"
+#include "RingBuffer.h"
 
 class MainWindow : public QMainWindow
 {
@@ -60,6 +65,14 @@ private:
     void updateJacket();
     void updateModeDesc(const QString &mode);
     void turnOffBitPerfect();
+    void clearCdState();  // ★ UIキャッシュ完全クリア
+
+    // ★ CD Stream Mode
+    void playCd(const QString &drive);
+    void startCdStreamMode();
+    void startCdTrackStream(int trackIndex);
+    void stopIfCd();       // ★ CD再生中なら安全停止（全ボタン共通）
+    void stopCdStream();
 
     Player         *m_player   = nullptr;
     TrayManager    *m_tray     = nullptr;
@@ -111,6 +124,19 @@ private:
     bool m_hasArtwork = false;
     bool m_hp1On  = false;
     bool m_hp2On  = false;
+    QString     m_soundField;
+
+    // ★ CD再生（MCI方式）
+    DiscInfo  m_discInfo;
+    QString   m_cdDrive;
+    bool      m_isCdMode       = false;
+    int       m_cdTrackCount   = 0;
+    int       m_cdCurrentTrack = 0;
+    bool      m_mciOpen        = false;
+    QTimer   *m_cdTrackTimer   = nullptr;
+    std::unique_ptr<RingBuffer>     m_cdBuffer;
+    std::unique_ptr<CDReader>       m_cdReader;
+    std::unique_ptr<CdStreamWriter> m_cdWriter;
 
     // アルバムブラウザ
     QWidget      *m_mainContent      = nullptr;
@@ -122,10 +148,9 @@ private:
     QLabel       *m_albumFooterLabel = nullptr;
     QLineEdit    *m_albumSearchBox   = nullptr;
 
-    // アルバムカード情報（検索フィルタ用）
     struct AlbumCardInfo {
         QWidget *card;
-        QString  searchKey;  // 正規化済み検索キー
+        QString  searchKey;
     };
     QList<AlbumCardInfo> m_albumCards;
 };

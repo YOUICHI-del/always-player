@@ -26,6 +26,12 @@ public:
     void preWarm();
     void loadFolder(const QString &path);
     void loadFile(const QString &filePath);  // 一曲再生
+    void loadPlaylist(const QStringList &paths);  // ★ CD再生用に追加
+    void loadCdStream(const QString &filePath);
+    void setMediaTitle(const QString &title);       // ★ Named Pipe経由CDストリーミング
+    void loadCdDirect(const QString &driveLetter);     // ★ First Mode：mpv直接CD再生
+    void appendPlaylist(const QStringList &paths); // 再生中断なしでプレイリスト更新
+    void clearPlaylist();                              // ★ プレイリストを完全クリア
     void play(int index = -1);
     void pause();
     void resume();
@@ -33,7 +39,7 @@ public:
     void next();
     void prev();
     void setVolume(int vol);
-    void setMode(const QString &mode, bool hp1 = false, bool hp2 = false);
+    void setMode(const QString &mode, bool hp1 = false, bool hp2 = false, const QString &soundField = QString());
     void setModeQuiet(const QString &mode) { m_mode = mode; }
     void setAudioDevice(const QString &deviceId);
     void disableBitPerfect();  // 排他モード解除（stop→設定→再生は呼び出し側で行う）
@@ -56,6 +62,7 @@ public:
     QString currentFile()     const;
     QString currentFilePath() const;
     QString fileAt(int i)   const;
+    QString filePathAt(int i) const;  // フルパスを返す
     QString getInfo(const QString &mode = QString()) const;
     QString getTagTitle()   const;
     QString getTagArtist()  const;
@@ -69,6 +76,8 @@ public:
     mpv_handle *mpvHandle()  const { return m_mpv; }
     int     volume()        const { return m_volume; }
     int     cachedSr()      const { return m_cachedSr; }
+    int     cachedBr()      const { return m_cachedBr; }
+    void    setCachedInfo(int br, int sr, int bits) { m_cachedBr = br; m_cachedSr = sr; m_cachedBits = bits; }
 
 signals:
     void trackChanged(int index, const QString &filename,
@@ -93,6 +102,7 @@ private:
     QString      m_lastFolder;
     bool         m_hp1          = false;
     bool         m_hp2          = false;
+    QString      m_soundField;
     QMutex       m_mutex;
     RepeatMode   m_repeatMode  = RepeatMode::None;
     ShuffleMode  m_shuffleMode = ShuffleMode::None;
@@ -110,6 +120,7 @@ private:
 
     // infoラベル用キャッシュ（play()時に更新）
     int m_cachedBr   = 0;
+    int m_realtimeBr = 0;   // demuxer-cache-stateから取得するリアルタイムkbps
     int m_cachedSr   = 0;
     int m_cachedBits = 0;
 };

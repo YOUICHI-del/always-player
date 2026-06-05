@@ -21,6 +21,11 @@
 #include <QPixmap>
 #include <QIcon>
 #include <QMessageBox>
+#include <QDialog>
+#include <QRadioButton>
+#include <QButtonGroup>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QMenu>
 #include <QProcess>
 #include <QDialog>
@@ -34,6 +39,7 @@
 #include <QtConcurrent>
 #include <QFutureWatcher>
 #include <windows.h>
+#include <mmsystem.h>  // MCI CD再生
 #include <shellapi.h>
 #include <powrprof.h>
 #include <winreg.h>
@@ -173,13 +179,12 @@ static QString searchWikipediaUrl(const QString &artist)
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 {
-    setWindowTitle("Always Player  v5.0.0");
+    setWindowTitle("Always Player  v6.0.0");
     setWindowIcon(QIcon(":/icons/Always.ico"));
     setMinimumSize(900, 700);
 
     m_player = new Player(this);
     m_player->init();
-
     setupUI();
     applyStyle();
     setupTray();
@@ -191,6 +196,45 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 
     m_infoTimer = new QTimer(this);
     connect(m_infoTimer, &QTimer::timeout, [this]{
+
+        // ★ MCI CD再生中の処理
+        if (m_isCdMode && m_mciOpen) {
+            // VUメーターを擬似的に振動させる
+            m_vuMeter->setPlaying(true);
+
+            // MCI からミリ秒形式で位置・長さを取得
+            mciSendStringW(L"set cd time format milliseconds", nullptr, 0, nullptr);
+
+            wchar_t posBuf[64] = {}, lenBuf[64] = {}, startBuf[64] = {};
+            mciSendStringW(L"status cd position", posBuf, 64, nullptr);
+
+            // 現在トラックの長さと開始位置
+            QString lenCmd   = QString("status cd length track %1").arg(m_cdCurrentTrack + 1);
+            QString startCmd = QString("status cd position track %1").arg(m_cdCurrentTrack + 1);
+            mciSendStringW(reinterpret_cast<LPCWSTR>(lenCmd.utf16()),   lenBuf,   64, nullptr);
+            mciSendStringW(reinterpret_cast<LPCWSTR>(startCmd.utf16()), startBuf, 64, nullptr);
+
+            // 再生フォーマットをtmsfに戻す
+            mciSendStringW(L"set cd time format tmsf", nullptr, 0, nullptr);
+
+            double posMs      = QString::fromWCharArray(posBuf).trimmed().toDouble();
+            double lenMs      = QString::fromWCharArray(lenBuf).trimmed().toDouble();
+            double startMs    = QString::fromWCharArray(startBuf).trimmed().toDouble();
+            double relPosMs   = posMs - startMs;
+            if (relPosMs < 0) relPosMs = 0;
+
+            if (!m_seekDragging && lenMs > 0) {
+                m_seekSlider->setValue(static_cast<int>(relPosMs / lenMs * 1000));
+                auto fmt = [](double ms) -> QString {
+                    int sec = static_cast<int>(ms / 1000.0);
+                    int mi = sec / 60, s = sec % 60;
+                    return QString("%1:%2").arg(mi).arg(s, 2, 10, QChar('0'));
+                };
+                m_timeLabel->setText(fmt(relPosMs) + " / " + fmt(lenMs));
+            }
+            return;
+        }
+
         if (m_player->isPlaying()) {
             m_infoLabel->setText(m_player->getInfo(currentMode()));
 
@@ -211,7 +255,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
             }
         }
     });
-    m_infoTimer->start(1);
+    m_infoTimer->start(500);  // MCI用は500msで十分
 
     loadFavorites();
 
@@ -337,6 +381,7 @@ void MainWindow::setupUI()
     m_artistInfoBtn->setObjectName("toolBtn");
     m_artistInfoBtn->setEnabled(false);
     connect(m_artistInfoBtn, &QPushButton::clicked, this, [this]() {
+        stopIfCd();  // ★ CD再生中なら停止
         if (m_currentArtist.isEmpty()) return;
 
         // カンマ・セミコロン・スラッシュ・コロンで複数アーティストに分割
@@ -533,12 +578,15 @@ void MainWindow::setupUI()
         btn->setChecked(modeKeys[i] == "dsd8");
         m_modeBtns[modeKeys[i]] = btn;
         connect(btn, &QPushButton::clicked, [this, key=modeKeys[i]]{
+            stopIfCd();  // ★ CD再生中なら停止
             // ハイレゾ音源はピュアモードのみ
-            QString actualKey = (key != "pure" && m_player->cachedSr() > 48000) ? "pure" : key;
+            bool hiRes = (m_player->cachedSr() > 48000);
+            QString actualKey = (key != "pure" && hiRes) ? "pure" : key;
             for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it)
                 it.value()->setChecked(it.key() == actualKey);
-            m_player->setMode(actualKey, m_hp1On, m_hp2On);
+            m_player->setMode(actualKey, m_hp1On, m_hp2On, m_soundField);
             updateModeDesc(actualKey);
+            m_infoLabel->setText(m_player->getInfo(currentMode()));
         });
         modeGrid->addWidget(btn, 0, i);
     }
@@ -554,14 +602,16 @@ void MainWindow::setupUI()
     hp2Btn->setObjectName("modeBtn");
     hp2Btn->setCheckable(true);
     connect(hp1Btn, &QPushButton::clicked, [this, hp1Btn, hp2Btn](bool checked){
+        stopIfCd();  // ★ CD再生中なら停止
         m_hp1On = checked;
         if (checked) { m_hp2On = false; hp2Btn->setChecked(false); }
-        m_player->setMode(currentMode(), m_hp1On, m_hp2On);
+        m_player->setMode(currentMode(), m_hp1On, m_hp2On, m_soundField);
     });
     connect(hp2Btn, &QPushButton::clicked, [this, hp1Btn, hp2Btn](bool checked){
+        stopIfCd();  // ★ CD再生中なら停止
         m_hp2On = checked;
         if (checked) { m_hp1On = false; hp1Btn->setChecked(false); }
-        m_player->setMode(currentMode(), m_hp1On, m_hp2On);
+        m_player->setMode(currentMode(), m_hp1On, m_hp2On, m_soundField);
     });
     hpRow->addWidget(hp1Btn);
     hpRow->addWidget(hp2Btn);
@@ -596,14 +646,41 @@ void MainWindow::setupUI()
     m_stopBtn  = makeCtrlBtn(":/buttons/stop.png",  60);
     m_nextBtn  = makeCtrlBtn(":/buttons/skip.png",  60);
 
-    connect(m_prevBtn,  &QPushButton::clicked, [this]{ m_player->prev(); });
+    connect(m_prevBtn, &QPushButton::clicked, [this]{
+        if (m_isCdMode) {
+            int prev = m_cdCurrentTrack - 1;
+            if (prev >= 0) startCdTrackStream(prev);
+        } else {
+            m_player->prev();
+        }
+    });
     connect(m_pauseBtn, &QPushButton::clicked, [this]{ m_player->pause(); });
     connect(m_playBtn,  &QPushButton::clicked, [this]{
-        if (m_player->isPaused()) m_player->resume();
-        else m_player->play();
+        if (m_isCdMode && !m_player->isPlaying() && !m_player->isPaused()) {
+            // ★ Stream Mode で即時再生開始
+            startCdStreamMode();
+            return;
+        } else if (m_player->isPaused()) {
+            m_player->resume();
+        } else {
+            m_player->play();
+        }
     });
-    connect(m_stopBtn, &QPushButton::clicked, [this]{ m_player->stop(); });
-    connect(m_nextBtn, &QPushButton::clicked, [this]{ m_player->next(); });
+    connect(m_stopBtn, &QPushButton::clicked, [this]{
+        if (m_isCdMode) {
+            stopCdStream();
+            clearCdState();
+        }
+        m_player->stop();
+    });
+    connect(m_nextBtn, &QPushButton::clicked, [this]{
+        if (m_isCdMode) {
+            int next = m_cdCurrentTrack + 1;
+            if (next < m_cdTrackCount) startCdTrackStream(next);
+        } else {
+            m_player->next();
+        }
+    });
 
     ctrlRow->addWidget(m_prevBtn);
     ctrlRow->addWidget(m_pauseBtn);
@@ -692,7 +769,8 @@ void MainWindow::setupUI()
     m_playlist->setMaximumHeight(150);
     connect(m_playlist, &QListWidget::itemDoubleClicked, [this](QListWidgetItem *item){
         int idx = item->data(Qt::UserRole).toInt();
-        m_player->play(idx);
+        if (m_isCdMode) startCdTrackStream(idx);
+        else m_player->play(idx);
     });
     cl->addWidget(m_playlist);
 
@@ -839,29 +917,360 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *event)
 
 void MainWindow::onSelectFolder()
 {
-    m_player->stop();     // 停止ボタンと同じ処理でWASAPIを解放
+    m_player->stop();
     turnOffBitPerfect();
+    m_player->setCachedInfo(0, 0, 0);
+    m_hp1On = false;
+    m_hp2On = false;
+    m_infoLabel->setText("---");
+    m_title->clear();
+    m_subTitle->clear();
+    for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
+        it.value()->setEnabled(true);
+        it.value()->setChecked(it.key() == "dsd8");
+    }
+
     QString path = QFileDialog::getExistingDirectory(
         this, jp("\xe9\x9f\xb3\xe6\xa5\xbd\xe3\x83\x95\xe3\x82\xa9\xe3\x83\xab\xe3\x83\x80\xe3\x82\x92\xe9\x81\xb8\xe6\x8a\x9e"),
         m_currentFolder, QFileDialog::ShowDirsOnly);
-    if (!path.isEmpty()) loadFolder(path, false);
+
+    if (path.isEmpty()) return;
+
+    // ★ CDドライブが選択されたら playCd() へ
+    QString driveLetter = path.left(2);  // 例: "D:"
+    if (GetDriveTypeA((driveLetter + "\\").toLocal8Bit().constData()) == DRIVE_CDROM) {
+        playCd(driveLetter);
+        return;
+    }
+
+    // 通常フォルダ
+    loadFolder(path, false);
+}
+
+// ─────────────────────────────────────────────
+// CD Stream Mode
+// ─────────────────────────────────────────────
+
+// ★ UIキャッシュを完全クリア
+void MainWindow::clearCdState()
+{
+    m_player->stop();
+    m_isCdMode       = false;
+    m_cdCurrentTrack = 0;
+    m_playlist->clear();
+    m_allItems.clear();
+    m_allIndices.clear();
+    m_title->setText("");
+    m_subTitle->setText("");
+    m_statusBar->setText("");
+    m_seekSlider->setValue(0);
+    m_timeLabel->setText("0:00 / 0:00");
+    m_hasArtwork = false;
+    m_showVU     = true;
+    m_stack->setCurrentIndex(0);
+
+    // ★ モードボタンを全て有効化に戻す
+    for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it)
+        it.value()->setEnabled(true);
+}
+
+// ★ CDドライブ選択時：TOC読み込みとプレイリスト表示
+void MainWindow::playCd(const QString &drive)
+{
+    CdDrive tmp;
+    if (!tmp.open(drive)) {
+        qDebug() << "[playCd] drive open failed";
+        return;
+    }
+    m_discInfo = tmp.readToc();
+    tmp.close();
+
+    if (m_discInfo.tracks.isEmpty()) {
+        qDebug() << "[playCd] no tracks";
+        return;
+    }
+
+    m_cdDrive      = drive;
+    m_isCdMode     = true;
+    m_cdTrackCount = m_discInfo.tracks.size();
+    m_cdCurrentTrack = 0;
+
+    // ★ UIキャッシュを完全クリアしてから構築
+    m_player->stop();
+    m_playlist->clear();
+    m_allItems.clear();
+    m_allIndices.clear();
+
+    for (int i = 0; i < m_cdTrackCount; i++) {
+        const TrackInfo &t = m_discInfo.tracks[i];
+        QString name = t.title.isEmpty()
+            ? QString("Track %1").arg(t.number, 2, 10, QChar('0'))
+            : t.title;
+        m_allItems   << name;
+        m_allIndices << i;
+        QListWidgetItem *item = new QListWidgetItem(name);
+        item->setData(Qt::UserRole, i);
+        m_playlist->addItem(item);
+    }
+    m_playlist->setCurrentRow(0);
+
+    QString sub = QString("%1 Tracks").arg(m_cdTrackCount);
+    if (!m_discInfo.albumTitle.isEmpty()) sub += "   " + m_discInfo.albumTitle;
+
+    m_title->setText("CD  -  Press Play");
+    m_subTitle->setText(sub);
+    m_hasArtwork = false;
+    m_showVU     = true;
+    m_stack->setCurrentIndex(0);
+
+    if (m_artistInfoBtn) m_artistInfoBtn->setEnabled(false);
+    setWindowTitle(jp("Always Player  v6.0.0  -  CD"));
+    m_statusBar->setText(">> Press Play to start");
+
+    // ★ CD再生時はピュアのみ有効・他は無効化
+    for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
+        it.value()->setChecked(it.key() == "pure");
+        it.value()->setEnabled(it.key() == "pure");
+    }
+    updateModeDesc("pure");
+    if (m_infoLabel) m_infoLabel->setText("PCM_S16LE  |  1411 kbps  |  44.1 kHz  /  16bit");
+}
+
+// ★ ストリームを停止してリソースを解放
+// ★ CD再生中なら安全に停止する（全ボタン共通の入口）
+void MainWindow::stopIfCd()
+{
+    if (!m_isCdMode) return;  // CD再生中でなければ何もしない
+
+    // 1. タイマー停止（コールバックを止める）
+    if (m_cdTrackTimer) {
+        m_cdTrackTimer->stop();
+        delete m_cdTrackTimer;
+        m_cdTrackTimer = nullptr;
+    }
+
+    // 2. MCI停止
+    if (m_mciOpen) {
+        mciSendStringW(L"stop cd", nullptr, 0, nullptr);
+        mciSendStringW(L"close cd", nullptr, 0, nullptr);
+        m_mciOpen = false;
+    }
+
+    // 3. VUメーター停止
+    if (m_vuMeter) m_vuMeter->setPlaying(false);
+
+    // 4. CD状態フラグをリセット
+    m_isCdMode       = false;
+    m_cdCurrentTrack = 0;
+
+    // 5. UIをリセット
+    m_seekSlider->setValue(0);
+    m_timeLabel->setText("0:00 / 0:00");
+
+    // 6. モードボタンを全て有効化
+    for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it)
+        it.value()->setEnabled(true);
+}
+
+void MainWindow::stopCdStream()
+{
+    // MCIを停止・クローズ
+    if (m_mciOpen) {
+        mciSendStringW(L"stop cd", nullptr, 0, nullptr);
+        mciSendStringW(L"close cd", nullptr, 0, nullptr);
+        m_mciOpen = false;
+    }
+    if (m_cdTrackTimer) {
+        m_cdTrackTimer->stop();
+        delete m_cdTrackTimer;
+        m_cdTrackTimer = nullptr;
+    }
+    // CdStreamWriterも念のため停止
+    if (m_cdWriter) {
+        m_cdWriter->stop();
+        m_cdWriter->wait(1000);
+        m_cdWriter.reset();
+    }
+    if (m_cdReader) {
+        m_cdReader->stopReading();
+        m_cdReader->wait(1000);
+        m_cdReader.reset();
+    }
+    if (m_cdBuffer) m_cdBuffer.reset();
+}
+
+// ★ MCI方式CD再生開始（再生ボタン押下時）
+void MainWindow::startCdStreamMode()
+{
+    if (!m_isCdMode) return;
+    startCdTrackStream(m_cdCurrentTrack);
+}
+
+// ★ MCI方式：指定トラックを即時再生
+void MainWindow::startCdTrackStream(int trackIndex)
+{
+    if (trackIndex < 0 || trackIndex >= m_cdTrackCount) return;
+
+    m_cdCurrentTrack = trackIndex;
+
+    // 前の再生を停止
+    stopCdStream();
+
+    // ★ MCI でCDを開く（時間フォーマットをトラックに設定）
+    QString openCmd = QString("open %1 type cdaudio alias cd").arg(m_cdDrive);
+    MCIERROR err = mciSendStringW(
+        reinterpret_cast<LPCWSTR>(openCmd.utf16()),
+        nullptr, 0, nullptr);
+
+    if (err != 0) {
+        wchar_t errMsg[256];
+        mciGetErrorStringW(err, errMsg, 256);
+        qDebug() << "[MCI] open failed:" << QString::fromWCharArray(errMsg);
+        m_statusBar->setText(">> CD open failed");
+        return;
+    }
+
+    m_mciOpen = true;
+
+    // ★ 時間フォーマットをTMSF（Track-Minute-Second-Frame）に設定
+    mciSendStringW(L"set cd time format tmsf", nullptr, 0, nullptr);
+
+    // ★ 少し待ってからplay（先頭欠け防止）
+    QTimer::singleShot(2000, this, [this, trackIndex](){
+        if (!m_mciOpen) return;
+
+        // TMSF形式: track:minute:second:frame → "play cd from 01:00:00:00"
+        QString fromStr = QString("%1:00:00:00").arg(trackIndex + 1, 2, 10, QChar('0'));
+        QString playCmd = QString("play cd from %1").arg(fromStr);
+        MCIERROR err2 = mciSendStringW(
+            reinterpret_cast<LPCWSTR>(playCmd.utf16()),
+            nullptr, 0, nullptr);
+
+        if (err2 != 0) {
+            wchar_t errMsg[256];
+            mciGetErrorStringW(err2, errMsg, 256);
+            qDebug() << "[MCI] play failed:" << QString::fromWCharArray(errMsg);
+            mciSendStringW(L"close cd", nullptr, 0, nullptr);
+            m_mciOpen = false;
+            m_statusBar->setText(">> CD play failed");
+            return;
+        }
+
+        qDebug() << "[MCI] playing Track" << (trackIndex + 1);
+        if (m_infoLabel) m_infoLabel->setText("PCM_S16LE  |  1411 kbps  |  44.1 kHz  /  16bit");
+
+        // タイマー起動
+        if (m_cdTrackTimer) {
+            m_cdTrackTimer->stop();
+            m_cdTrackTimer->deleteLater();
+            m_cdTrackTimer = nullptr;
+        }
+        m_cdTrackTimer = new QTimer(this);
+        m_cdTrackTimer->setInterval(500);
+        connect(m_cdTrackTimer, &QTimer::timeout, this, [this](){
+            if (!m_mciOpen) { m_cdTrackTimer->stop(); return; }
+            wchar_t statusBuf[64] = {};
+            mciSendStringW(L"status cd mode", statusBuf, 64, nullptr);
+            QString mode = QString::fromWCharArray(statusBuf).trimmed().toLower();
+            if (mode == "stopped" || mode == "not ready" || mode.isEmpty()) {
+                m_cdTrackTimer->stop();
+                qDebug() << "[MCI] Track" << (m_cdCurrentTrack + 1) << "finished";
+                mciSendStringW(L"close cd", nullptr, 0, nullptr);
+                m_mciOpen = false;
+                int next = m_cdCurrentTrack + 1;
+                if (next < m_cdTrackCount) {
+                    QTimer::singleShot(200, this, [this, next](){
+                        startCdTrackStream(next);
+                    });
+                } else {
+                    m_vuMeter->setPlaying(false);
+                    m_seekSlider->setValue(0);
+                    m_timeLabel->setText("0:00 / 0:00");
+                    m_statusBar->setText(">> CD 再生完了");
+                    setWindowTitle(jp("Always Player  v6.0.0  -  CD"));
+                }
+            }
+        });
+        m_cdTrackTimer->start();
+    });
+
+    // UI更新
+    QString name = (!m_discInfo.tracks.isEmpty() &&
+                    trackIndex < m_discInfo.tracks.size() &&
+                    !m_discInfo.tracks[trackIndex].title.isEmpty())
+        ? m_discInfo.tracks[trackIndex].title
+        : QString("Track %1").arg(trackIndex + 1, 2, 10, QChar('0'));
+
+    m_title->setText(name);
+    m_subTitle->setText(QString("%1  /  %2").arg(trackIndex + 1).arg(m_cdTrackCount));
+    m_playlist->setCurrentRow(trackIndex);
+    m_statusBar->setText(">> " + name);
+    setWindowTitle(jp("Always Player  v6.0.0  -  CD  -  ") + name);
+
+
 }
 
 void MainWindow::onSelectFile()
 {
     m_player->stop();     // 停止ボタンと同じ処理でWASAPIを解放
     turnOffBitPerfect();
+    // ── 前の状態をリセット ──
+    m_player->setCachedInfo(0, 0, 0);
+    // m_soundFieldは維持（Settings設定を引き継ぐ）
+    m_hp1On = false;
+    m_hp2On = false;
+    m_infoLabel->setText("---");
+    for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
+        it.value()->setEnabled(true);
+        it.value()->setChecked(it.key() == "dsd8");
+    }
     QString path = QFileDialog::getOpenFileName(
         this, jp("\xe9\x9f\xb3\xe6\xa5\xbd\xe3\x83\x95\xe3\x82\xa1\xe3\x82\xa4\xe3\x83\xab\xe3\x82\x92\xe9\x81\xb8\xe6\x8a\x9e"),
         m_currentFolder,
         "Audio Files (*.mp3 *.flac *.wav *.aac *.m4a *.ogg *.opus *.dsf *.dff *.aiff *.wv)");
     if (path.isEmpty()) return;
     m_player->loadFile(path);
-    // 自動再生しない（再生ボタンを押して開始）
+    // TagLibで情報取得→cachedInfo更新→infoLabel即時表示
+    {
+        int br = 0, sr = 0, bits = 0;
+        QString ext = QFileInfo(path).suffix().toLower();
+        if (ext == "flac") {
+            TagLib::FLAC::File tf(path.toStdWString().c_str());
+            if (tf.isValid() && tf.audioProperties()) {
+                br = tf.audioProperties()->bitrate();
+                sr = tf.audioProperties()->sampleRate();
+                bits = tf.audioProperties()->bitsPerSample();
+            }
+        } else if (ext == "m4a" || ext == "mp4" || ext == "aac") {
+            TagLib::MP4::File tf(path.toStdWString().c_str());
+            if (tf.isValid() && tf.audioProperties()) {
+                br = tf.audioProperties()->bitrate();
+                sr = tf.audioProperties()->sampleRate();
+                bits = tf.audioProperties()->bitsPerSample();
+            }
+        } else {
+            TagLib::FileRef ref(path.toStdWString().c_str());
+            if (!ref.isNull() && ref.audioProperties()) {
+                br = ref.audioProperties()->bitrate();
+                sr = ref.audioProperties()->sampleRate();
+            }
+        }
+        m_player->setCachedInfo(br, sr, bits);
+        bool hiRes = (sr > 48000);
+        QString autoMode = hiRes ? "pure" : "dsd8";
+        for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
+            it.value()->setChecked(it.key() == autoMode);
+            it.value()->setEnabled(!hiRes || it.key() == "pure");
+        }
+        updateModeDesc(autoMode);
+        m_player->setModeQuiet(autoMode);
+        m_infoLabel->setText(m_player->getInfo(currentMode()));
+    }
 }
 
 void MainWindow::loadFolder(const QString &path, bool autoPlay)
 {
+    m_isCdMode = false;  // ★ フォルダ読み込み時はCDモードを解除
     m_currentFolder = path;
     m_player->loadFolder(path);
     m_playlist->clear();
@@ -875,31 +1284,77 @@ void MainWindow::loadFolder(const QString &path, bool autoPlay)
         item->setData(Qt::UserRole, i);
         m_playlist->addItem(item);
     }
-    m_infoLabel->setText(jp("\xe6\x9b\xb2\xe6\x95\xb0: ") + QString::number(m_player->total()));
-
-    // ── アルバム選択直後に1曲目の情報を即時表示（再生前でも）──
+    // ── フォルダ選択直後：1曲目をTagLibで読んでUI即時更新 ──
     if (m_player->total() > 0) {
-        QString firstFile = m_player->fileAt(0);
+        QString fp = m_player->filePathAt(0);
+        int br = 0, sr = 0, bits = 0;
         QString title, artist;
-        TagLib::FileRef ref(firstFile.toStdWString().c_str());
-        if (!ref.isNull() && ref.tag()) {
-            title  = QString::fromStdString(ref.tag()->title().to8Bit(true));
-            artist = QString::fromStdString(ref.tag()->artist().to8Bit(true));
+        if (!fp.isEmpty()) {
+            QString ext = QFileInfo(fp).suffix().toLower();
+            if (ext == "flac") {
+                TagLib::FLAC::File tf(fp.toStdWString().c_str());
+                if (tf.isValid()) {
+                    if (tf.tag()) {
+                        title  = QString::fromStdString(tf.tag()->title().to8Bit(true));
+                        artist = QString::fromStdString(tf.tag()->artist().to8Bit(true));
+                    }
+                    if (tf.audioProperties()) {
+                        br   = tf.audioProperties()->bitrate();
+                        sr   = tf.audioProperties()->sampleRate();
+                        bits = tf.audioProperties()->bitsPerSample();
+                    }
+                }
+            } else if (ext == "m4a" || ext == "mp4" || ext == "aac") {
+                TagLib::MP4::File tf(fp.toStdWString().c_str());
+                if (tf.isValid()) {
+                    if (tf.tag()) {
+                        title  = QString::fromStdString(tf.tag()->title().to8Bit(true));
+                        artist = QString::fromStdString(tf.tag()->artist().to8Bit(true));
+                    }
+                    if (tf.audioProperties()) {
+                        br   = tf.audioProperties()->bitrate();
+                        sr   = tf.audioProperties()->sampleRate();
+                        bits = tf.audioProperties()->bitsPerSample();
+                    }
+                }
+            } else {
+                TagLib::FileRef ref(fp.toStdWString().c_str());
+                if (!ref.isNull()) {
+                    if (ref.tag()) {
+                        title  = QString::fromStdString(ref.tag()->title().to8Bit(true));
+                        artist = QString::fromStdString(ref.tag()->artist().to8Bit(true));
+                    }
+                    if (ref.audioProperties()) {
+                        br = ref.audioProperties()->bitrate();
+                        sr = ref.audioProperties()->sampleRate();
+                    }
+                }
+            }
         }
-        // 曲名表示（タグがなければファイル名）
-        m_title->setText(title.isEmpty()
-            ? QFileInfo(firstFile).completeBaseName() : title);
-        // サブタイトル（曲番号 / 総曲数　アーティスト名）
+        // キャッシュ更新
+        m_player->setCachedInfo(br, sr, bits);
+        // ハイレゾ判定→モードボタン更新
+        bool hiRes = (sr > 48000);
+        QString autoMode = hiRes ? "pure" : "dsd8";
+        for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
+            it.value()->setChecked(it.key() == autoMode);
+            it.value()->setEnabled(!hiRes || it.key() == "pure");
+        }
+        updateModeDesc(autoMode);
+        m_player->setModeQuiet(autoMode);
+        // infoLabel即時表示
+        m_infoLabel->setText(m_player->getInfo(currentMode()));
+        // タグ表示
+        QString firstFileName = m_player->fileAt(0);
+        m_title->setText(title.isEmpty() ? QFileInfo(fp).completeBaseName() : title);
         QString sub = QString("1  /  %1").arg(m_player->total());
         if (!artist.isEmpty()) sub += "   " + artist;
         m_subTitle->setText(sub);
         m_currentArtist = artist;
         if (m_artistInfoBtn) m_artistInfoBtn->setEnabled(!artist.isEmpty());
         m_playlist->setCurrentRow(0);
-        setWindowTitle(QString::fromUtf8("Always Player  v5.0.0  -  ")
-                       + QFileInfo(firstFile).fileName());
-        m_statusBar->setText(">> " + (title.isEmpty()
-            ? QFileInfo(firstFile).completeBaseName() : title));
+        setWindowTitle(QString::fromUtf8("Always Player  v6.0.0  -  ") + QFileInfo(fp).fileName());
+        m_statusBar->setText(">> " + (title.isEmpty() ? QFileInfo(fp).completeBaseName() : title));
     }
 
     // ── アルバムアートを即時更新 ──
@@ -947,6 +1402,9 @@ void MainWindow::updateJacket()
 void MainWindow::onTrackChanged(int index, const QString &filename,
                                 const QString &title, const QString &artist)
 {
+    // ★ CD再生中はStreamModeで管理するのでスキップ
+    if (m_isCdMode) return;
+
     m_title->setText(title.isEmpty() ? filename.section('.', 0, -2) : title);
     QString sub = QString("%1  /  %2").arg(index + 1).arg(m_player->total());
     if (!artist.isEmpty()) sub += "   " + artist;
@@ -954,21 +1412,56 @@ void MainWindow::onTrackChanged(int index, const QString &filename,
     m_currentArtist = artist;
     if (m_artistInfoBtn) m_artistInfoBtn->setEnabled(!artist.isEmpty());
     m_playlist->setCurrentRow(index);
-    setWindowTitle(QString::fromUtf8("Always Player  v5.0.0  -  ") + filename);
+    setWindowTitle(QString::fromUtf8("Always Player  v6.0.0  -  ") + filename);
     m_statusBar->setText(">> " + (title.isEmpty() ? filename.section('.', 0, -2) : title));
 
-    // ハイレゾ自動モード切り替え（ボタン表示のみ）
+    // ハイレゾ自動モード切り替え＋disabled制御＋infoLabel更新
     {
         QString fp = m_player->currentFilePath();
         if (!fp.isEmpty()) {
-            TagLib::FileRef ref(fp.toStdWString().c_str());
-            int sr = (!ref.isNull() && ref.audioProperties())
-                     ? ref.audioProperties()->sampleRate() : 0;
-            QString autoMode = (sr > 48000) ? "pure" : "dsd8";
-            for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it)
+            // TagLibでsr/bits取得
+            int br = 0, sr = 0, bits = 0;
+            QString ext = QFileInfo(fp).suffix().toLower();
+            if (ext == "flac") {
+                TagLib::FLAC::File tf(fp.toStdWString().c_str());
+                if (tf.isValid() && tf.audioProperties()) {
+                    br   = tf.audioProperties()->bitrate();
+                    sr   = tf.audioProperties()->sampleRate();
+                    bits = tf.audioProperties()->bitsPerSample();
+                }
+            } else if (ext == "m4a" || ext == "mp4" || ext == "aac") {
+                TagLib::MP4::File tf(fp.toStdWString().c_str());
+                if (tf.isValid() && tf.audioProperties()) {
+                    br   = tf.audioProperties()->bitrate();
+                    sr   = tf.audioProperties()->sampleRate();
+                    bits = tf.audioProperties()->bitsPerSample();
+                }
+            } else {
+                TagLib::FileRef ref(fp.toStdWString().c_str());
+                if (!ref.isNull() && ref.audioProperties()) {
+                    br = ref.audioProperties()->bitrate();
+                    sr = ref.audioProperties()->sampleRate();
+                }
+            }
+            // sr/bitsのみ更新、brはplay()のQtConcurrentで設定済みの値を維持
+            m_player->setCachedInfo(m_player->cachedBr(), sr, bits);
+
+            // ハイレゾ判定
+            bool hiRes = (sr > 48000);
+            QString autoMode = hiRes ? "pure" : "dsd8";
+
+            // ボタン状態更新
+            for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
                 it.value()->setChecked(it.key() == autoMode);
+                it.value()->setEnabled(!hiRes || it.key() == "pure");
+            }
             updateModeDesc(autoMode);
 
+            // モードを実際に切り替え（DSP処理も反映）
+            m_player->setMode(autoMode, m_hp1On, m_hp2On, m_soundField);
+
+            // infoLabel即時更新
+            m_infoLabel->setText(m_player->getInfo(currentMode()));
         }
     }
     // 少し遅延してアルバムアートを更新（mpvのファイルオープンと競合回避）
@@ -1009,6 +1502,7 @@ void MainWindow::onFavoriteClicked()
 
 void MainWindow::onShowFavorites()
 {
+    stopIfCd();  // ★ CD再生中なら停止
     if (m_favorites.isEmpty()) {
         QMessageBox::information(this,
             jp("\xe3\x81\x8a\xe6\xb0\x97\xe3\x81\xab\xe5\x85\xa5\xe3\x82\x8a"),
@@ -1035,6 +1529,7 @@ void MainWindow::onShowFavorites()
     connect(openBtn, &QPushButton::clicked, [this, lw, dlg]{
         auto *item = lw->currentItem();
         if (!item) return;
+        stopIfCd();  // ★ CD再生中なら停止
         m_player->stop();
         turnOffBitPerfect();
         loadFolder(item->data(Qt::UserRole).toString(), false);
@@ -1077,6 +1572,9 @@ void MainWindow::saveFavorites()
         QTextStream out(&f);
         out.setEncoding(QStringConverter::Utf8);
         for (const auto &l : lines) out << l << "\n";
+        // sound_field 保存
+        out << "[sound_field]\n";
+        out << "value=" << m_soundField << "\n";
         out << "[favorites]\n";
         for (auto it = m_favorites.begin(); it != m_favorites.end(); ++it)
             out << it.key() << "|" << it.value() << "\n";
@@ -1097,15 +1595,22 @@ void MainWindow::loadFavorites()
     QTextStream in(&f);
     in.setEncoding(QStringConverter::Utf8);
     bool inFav = false;
+    bool inSound = false;
     while (!in.atEnd()) {
         QString line = in.readLine().trimmed();
-        if (line == "[favorites]") { inFav = true; continue; }
-        if (line.startsWith("[")) { inFav = false; continue; }
+        if (line == "[sound_field]") { inSound = true; inFav = false; continue; }
+        if (line == "[favorites]") { inFav = true; inSound = false; continue; }
+        if (line.startsWith("[")) { inFav = false; inSound = false; continue; }
+        if (inSound && line.startsWith("value="))
+            m_soundField = line.mid(6);
         if (inFav && line.contains("|")) {
             int sep = line.indexOf("|");
             m_favorites[line.left(sep)] = line.mid(sep + 1);
         }
     }
+    // 読み込んだ音場効果をPlayerに反映
+    if (m_player && !m_soundField.isEmpty())
+        m_player->setMode("dsd8", false, false, m_soundField);
 }
 
 QString MainWindow::currentMode() const
@@ -1117,6 +1622,7 @@ QString MainWindow::currentMode() const
 
 void MainWindow::onSleepTimer()
 {
+    stopCdStream(); clearCdState();  // ★ CD停止
     QMenu *menu = new QMenu(this);
     auto addItem = [&](const QString &label, int minutes) {
         menu->addAction(label, [this, minutes] {
@@ -1374,6 +1880,29 @@ void MainWindow::showSettings()
 
     vl->addWidget(grpUsb);
 
+    // ── 音場効果グループ
+    auto *grpSound = new QGroupBox(QString::fromUtf8("音場効果（オプション）"));
+    auto *svl = new QVBoxLayout(grpSound);
+    auto *cbWow  = new QCheckBox(QString::fromUtf8("ワウフラッター（アナログレコード化）"));
+    auto *cbHall = new QCheckBox(QString::fromUtf8("ホールトーン（3メーター以内の試聴で強化）"));
+    if (m_soundField == "wowflutter") cbWow->setChecked(true);
+    else if (m_soundField == "halltone") cbHall->setChecked(true);
+    svl->addWidget(cbWow);
+    svl->addWidget(cbHall);
+    connect(cbWow, &QCheckBox::clicked, this, [this, cbWow, cbHall](bool checked){
+        if (checked) { cbHall->setChecked(false); m_soundField = "wowflutter"; }
+        else m_soundField = "";
+        turnOffBitPerfect();
+        m_player->setMode(currentMode(), m_hp1On, m_hp2On, m_soundField);
+    });
+    connect(cbHall, &QCheckBox::clicked, this, [this, cbWow, cbHall](bool checked){
+        if (checked) { cbWow->setChecked(false); m_soundField = "halltone"; }
+        else m_soundField = "";
+        turnOffBitPerfect();
+        m_player->setMode(currentMode(), m_hp1On, m_hp2On, m_soundField);
+    });
+    vl->addWidget(grpSound);
+
     // ── デフォルトに戻すボタン
     auto *resetBtn = new QPushButton(QString::fromUtf8("\xe3\x81\x99\xe3\x81\xb9\xe3\x81\xa6\xe3\x82\x92\xe3\x83\x87\xe3\x83\x95\xe3\x82\xa9\xe3\x83\xab\xe3\x83\x88\xe3\x81\xab\xe6\x88\xbb\xe3\x81\x99"));
     resetBtn->setObjectName("toolBtn");
@@ -1424,7 +1953,7 @@ void MainWindow::showSettings()
     vl->addWidget(line);
 
     auto *aboutLabel = new QLabel(
-        "Always Player v5.0.0 (build " BUILD_TIMESTAMP ")\n"
+        "Always Player v6.0.0\n"
         "High Fidelity PC Audio Player\n\n"
         "(c) 2026 YOUICHI SAIJO  GPL-3.0");
     aboutLabel->setAlignment(Qt::AlignCenter);
@@ -1476,8 +2005,8 @@ void MainWindow::turnOffBitPerfect()
 
 void MainWindow::showAbout()
 {
-    QMessageBox::about(this, "Always Player v5.0.0",
-        "Always Player v5.0.0\nHigh Fidelity PC Audio Player\n\n"
+    QMessageBox::about(this, "Always Player v6.0.0",
+        "Always Player v6.0.0\nHigh Fidelity PC Audio Player\n\n"
         "(c) 2026 YOUICHI SAIJO -- GPL-3.0\n\n"
         "https://always-player.sakuraweb.com/");
 }
@@ -1579,6 +2108,9 @@ QPixmap MainWindow::findAlbumArt(const QString &folderPath, int size)
 // ── アルバムブラウザを開く
 void MainWindow::onBrowseAlbums()
 {
+    // WASAPI排他モードを先行解除（ダイアログ表示中のフリーズ防止）
+    turnOffBitPerfect();
+
     QString root = QFileDialog::getExistingDirectory(
         this, jp("\xe9\x9f\xb3\xe6\xa5\xbd\xe3\x83\xab\xe3\x83\xbc\xe3\x83\x88\xe3\x83\x95\xe3\x82\xa9\xe3\x83\xab\xe3\x83\x80\xe3\x82\x92\xe9\x81\xb8\xe6\x8a\x9e"),
         m_currentFolder, QFileDialog::ShowDirsOnly);
@@ -1794,11 +2326,19 @@ void MainWindow::populateAlbumBrowser(const QString &rootPath)
         artLbl->setObjectName("albumArtLabel");
         artLbl->setFixedSize(ART_SIZE, ART_SIZE);
         artLbl->setAlignment(Qt::AlignCenter);
-        QPixmap art = findAlbumArt(folderPath, ART_SIZE);
-        if (!art.isNull())
-            artLbl->setPixmap(art);
-        else
-            artLbl->setText("♪");
+        artLbl->setText("\xe2\x99\xaa");  // まず即座に♪プレースホルダーを表示
+
+        // アートワーク読み込みは別スレッドで（TagLib処理がGUIをブロックしない）
+        QPointer<QLabel> artPtr = artLbl;  // カード削除時のダングリングポインタ防止
+        QtConcurrent::run([this, folderPath, artPtr, ART_SIZE]() {
+            QPixmap art = findAlbumArt(folderPath, ART_SIZE);
+            if (!art.isNull()) {
+                QMetaObject::invokeMethod(qApp, [artPtr, art]() {
+                    if (artPtr)  // ウィジェットがまだ生きていれば反映
+                        artPtr->setPixmap(art);
+                }, Qt::QueuedConnection);
+            }
+        });
 
         // テキスト情報
         QWidget *infoW = new QWidget();

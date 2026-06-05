@@ -34,10 +34,15 @@ bool Player::init()
     // ★ audio-raw-data-pull は option → initialize 前に設定
     mpv_set_option_string(m_mpv, "audio-raw-data-pull", "yes");
 
+    // ★ configファイルを無効化（前回の状態が復元されるのを防ぐ）
+    mpv_set_option_string(m_mpv, "config", "no");
+    mpv_set_option_string(m_mpv, "no-resume-playback", "yes");
+
     mpv_set_option_string(m_mpv, "video",        "no");
     mpv_set_option_string(m_mpv, "really-quiet", "yes");
     mpv_set_option_string(m_mpv, "cache",        "no");
-    mpv_set_option_string(m_mpv, "audio-buffer", "0.02");
+    mpv_set_option_string(m_mpv, "audio-buffer", "0.1");
+    mpv_set_option_string(m_mpv, "demuxer",      "lavf"); // packet-bitrateを返す曲を増やす
 
     SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
 
@@ -53,10 +58,12 @@ bool Player::init()
 
     // ★ observe は initialize 後
     mpv_observe_property(m_mpv, 0, "audio-raw-data", MPV_FORMAT_NODE);
+    mpv_observe_property(m_mpv, 0, "playlist-pos", MPV_FORMAT_INT64);
 
     mpv_observe_property(m_mpv, 0, "time-pos",   MPV_FORMAT_DOUBLE);
     mpv_observe_property(m_mpv, 0, "duration",   MPV_FORMAT_DOUBLE);
     mpv_observe_property(m_mpv, 0, "eof-reached", MPV_FORMAT_FLAG);
+    mpv_observe_property(m_mpv, 0, "demuxer-cache-state", MPV_FORMAT_NODE);
 
     QThread *th = new QThread(this);
     connect(th, &QThread::started, [this]{ mpvEventLoop(); });
@@ -77,7 +84,12 @@ void Player::mpvEventLoop()
         if (ev->event_id == MPV_EVENT_END_FILE) {
             auto *ef = (mpv_event_end_file*)ev->data;
             if (ef->reason == MPV_END_FILE_REASON_EOF) {
-                QTimer::singleShot(0, this, [this]{ next(); });
+                // ★ 1曲ずつ方式：next()→play()→loadfile replace
+                // mpv playlistを使わないのでdrain待ち不要
+                QTimer::singleShot(0, this, [this]{
+                    qDebug() << "[Player] EOF → next()";
+                    next();
+                });
             }
         }
 
@@ -91,6 +103,22 @@ void Player::mpvEventLoop()
             // デバッグ
             qDebug() << "[PROP]" << prop->name << prop->format;
 
+            // demuxer-cache-state から packet-bitrate を取得（FLAC等のリアルタイムkbps）
+            if (prop && strcmp(prop->name, "demuxer-cache-state") == 0 &&
+                prop->format == MPV_FORMAT_NODE) {
+                mpv_node *node = (mpv_node*)prop->data;
+                if (node && node->format == MPV_FORMAT_NODE_MAP) {
+                    mpv_node_list *lst = node->u.list;
+                    for (int i = 0; i < lst->num; i++) {
+                        if (strcmp(lst->keys[i], "packet-bitrate") == 0 &&
+                            lst->values[i].format == MPV_FORMAT_DOUBLE) {
+                            double pb = lst->values[i].u.double_;
+                            if (pb > 0) m_realtimeBr = static_cast<int>(pb / 1000.0);
+                        }
+                    }
+                }
+            }
+
             if (prop && strcmp(prop->name, "audio-raw-data") == 0 &&
                 prop->format == MPV_FORMAT_NODE) {
 
@@ -101,6 +129,22 @@ void Player::mpvEventLoop()
                     qDebug() << "[RAW] PCM arrived";
                 }
             }
+
+            // ★ playlist-pos変化 → CD再生中はtrackChangedを発火
+            if (prop && strcmp(prop->name, "playlist-pos") == 0 &&
+                prop->format == MPV_FORMAT_INT64) {
+                int64_t pos = *(int64_t*)prop->data;
+                if (pos >= 0 && pos != m_currentIndex) {
+                    m_currentIndex = static_cast<int>(pos);
+                    int capturedIndex = m_currentIndex;
+                    qDebug() << "[Player] playlist-pos changed:" << capturedIndex;
+                    QMetaObject::invokeMethod(this, [this, capturedIndex]{
+                        emit trackChanged(capturedIndex, QString(), QString(), QString());
+                    }, Qt::QueuedConnection);
+                }
+            }
+
+
         }
     }
 }
@@ -129,9 +173,13 @@ void Player::applyAudioChain()
     // ソースのサンプリング周波数を取得（ハイレゾ判定用）
     int srcSr = 0;
     if (m_currentIndex < m_playlist.size()) {
-        TagLib::FileRef ref(m_playlist[m_currentIndex].toStdWString().c_str());
-        if (!ref.isNull() && ref.audioProperties())
-            srcSr = ref.audioProperties()->sampleRate();
+        // ★ cdda:// URIはTagLibで開けないのでスキップ
+        QString currentPath = m_playlist[m_currentIndex];
+        if (!currentPath.startsWith("cdda://")) {
+            TagLib::FileRef ref(currentPath.toStdWString().c_str());
+            if (!ref.isNull() && ref.audioProperties())
+                srcSr = ref.audioProperties()->sampleRate();
+        }
     }
     bool isHiRes = (srcSr > 48000);
 
@@ -181,6 +229,14 @@ if (m_hp1) {
     af += ",bs2b=jmeier";
 }
 
+// 音場効果（オプション）
+if (m_soundField == "wowflutter") {
+    af += ",vibrato=f=0.5:d=0.0008"; // ワウフラッター（アナログレコード化）
+} else if (m_soundField == "halltone") {
+    af += ",aecho=0.98:0.98:60:0.02"; // ホールトーン（3メーター以内の試聴で強化）
+}
+
+mpv_set_property_string(m_mpv, "audio-format", "s24"); // 24bit固定出力
 mpv_set_property_string(m_mpv, "af", af.toUtf8().constData());
 }
 
@@ -261,6 +317,87 @@ void Player::loadFile(const QString &filePath)
     m_currentIndex = 0;
 }
 
+// ★ CD再生用：cdda:// URI のリストをそのまま playlist にセット
+void Player::loadPlaylist(const QStringList &paths)
+{
+    QMutexLocker lock(&m_mutex);
+    stop();
+    m_playlist     = paths;
+    m_currentIndex = 0;
+}
+
+// ★ Named Pipe経由CDストリーミング再生
+// mpvにraw PCMストリームとして渡す
+// ★ 再生を止めずにプレイリストを追加・更新
+void Player::appendPlaylist(const QStringList &paths)
+{
+    QMutexLocker lock(&m_mutex);
+    // ★ 現在のインデックスを記録して全曲を追加
+    // 1曲目は既にreplace済みなので2曲目以降をappendで追加
+    int cur = m_currentIndex;
+    m_playlist = paths;
+    m_currentIndex = cur;
+
+    // mpvのプレイリストに2曲目以降を追加
+    for (int i = 1; i < paths.size(); i++) {
+        QByteArray p = paths[i].toUtf8();
+        const char *cmd[] = {"loadfile", p.constData(), "append", nullptr};
+        mpv_command(m_mpv, cmd);
+        qDebug() << "[Player] append:" << paths[i];
+    }
+
+    qDebug() << "[Player] appendPlaylist done: total=" << paths.size();
+}
+
+void Player::clearPlaylist()
+{
+    QMutexLocker lock(&m_mutex);
+    m_playlist.clear();
+    m_currentIndex = 0;
+    m_playing = false;
+    m_paused  = false;
+}
+
+void Player::loadCdDirect(const QString &driveLetter)
+{
+    // First ModeはWAVリッピング方式に変更（cdda://はmpvビルドに依存するため）
+    // この関数は使用しない（MainWindowのstartCdFirstModeで直接制御）
+    Q_UNUSED(driveLetter)
+    qDebug() << "[Player] loadCdDirect: not used";
+}
+
+void Player::loadCdStream(const QString &filePath)
+{
+    QMutexLocker lock(&m_mutex);
+    m_playlist.clear();
+    m_playlist << filePath;
+    m_currentIndex = 0;
+
+    qDebug() << "[Player] loadCdStream:" << filePath;
+
+    // ★ シンプルに通常WAVとして扱う
+    // まず音を出すことを優先（チューニングは後で）
+    mpv_set_property_string(m_mpv, "cache", "no");
+
+    QByteArray path = filePath.toUtf8();
+    const char *cmd[] = {"loadfile", path.constData(), "replace", nullptr};
+    mpv_command(m_mpv, cmd);
+
+    m_playing = true;
+    m_paused  = false;
+
+    double vol = static_cast<double>(m_volume);
+    mpv_set_property(m_mpv, "volume", MPV_FORMAT_DOUBLE, &vol);
+}
+
+void Player::setMediaTitle(const QString &title)
+{
+    QMutexLocker lock(&m_mutex);
+    QByteArray t = title.toUtf8();
+    mpv_set_property_string(m_mpv, "force-media-title", t.constData());
+    qDebug() << "[Player] setMediaTitle:" << title;
+}
+
 void Player::loadFolder(const QString &path)
 {
     QMutexLocker lock(&m_mutex);
@@ -269,14 +406,26 @@ void Player::loadFolder(const QString &path)
     m_currentIndex = 0;
     m_lastFolder = path;
 
-    // 最後のフォルダをiniに保存
+    // 最後のフォルダをiniに保存（アトミックセーブ方式）
     QString ini = QDir::homePath() + "/AlwaysPlayer.ini";
-    QFile f(ini);
-    if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+    QString tmp = ini + ".tmp";
+    QString bak = ini + ".bk";
+    // ① tmpに書く
+    {
+        QFile f(tmp);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) return;
         QTextStream s(&f);
         s << "[settings]\n";
         s << "last_folder=" << path << "\n";
+        s.flush(); f.flush();
     }
+    // ② 既存iniをバックアップ
+    if (QFile::exists(ini)) {
+        QFile::remove(bak);
+        QFile::rename(ini, bak);
+    }
+    // ③ tmp → ini
+    QFile::rename(tmp, ini);
 
 }
 
@@ -288,16 +437,23 @@ void Player::play(int index)
     if (m_currentIndex >= m_playlist.size()) return;
 
     QString file = m_playlist[m_currentIndex];
-    QString ext  = QFileInfo(file).suffix().toLower();
-    if (!SUPPORTED_EXT.contains(ext)) {
-        emit errorOccurred(QString("非対応フォーマット: %1").arg(ext));
-        return;
+
+    // ★ cdda:// URI は拡張子チェック・TagLib処理をスキップ
+    bool isCd = file.startsWith("cdda://");
+
+    if (!isCd) {
+        QString ext = QFileInfo(file).suffix().toLower();
+        if (!SUPPORTED_EXT.contains(ext)) {
+            emit errorOccurred(QString("非対応フォーマット: %1").arg(ext));
+            return;
+        }
     }
 
 // 音質チェーン適用
 applyAudioChain();
 
-// 再生開始
+// ★ 1曲だけloadfile replace（mpv playlist使用禁止）
+// mpv playlist + RAW PCM pull の組み合わせはEOFタイミングが壊れる
 QByteArray utf8 = file.toUtf8();
 const char *cmd[] = {"loadfile", utf8.constData(), "replace", nullptr};
 mpv_command(m_mpv, cmd);
@@ -308,6 +464,15 @@ m_paused  = false;
 // 音量を元に戻す
 double vol = static_cast<double>(m_volume);
 mpv_set_property(m_mpv, "volume", MPV_FORMAT_DOUBLE, &vol);
+
+// ★ CD再生はタグなし：インデックスのみ通知して終了
+if (isCd) {
+    int capturedIndex = m_currentIndex;
+    QMetaObject::invokeMethod(this, [this, capturedIndex]{
+        emit trackChanged(capturedIndex, QString(), QString(), QString());
+    }, Qt::QueuedConnection);
+    return;
+}
 
 // タグ読み取りを別スレッドで行いUIスレッドをブロックしない
 int capturedIndex = m_currentIndex;
@@ -407,10 +572,16 @@ void Player::resume()
 
 void Player::stop()
 {
-    const char *cmd[] = {"stop", nullptr};
-    if (m_mpv) mpv_command(m_mpv, cmd);
-    m_playing = false;
-    m_paused  = false;
+    if (m_mpv) {
+        // ★ stopしてプレイリストもクリア
+        const char *stopCmd[] = {"stop", nullptr};
+        mpv_command(m_mpv, stopCmd);
+        const char *clearCmd[] = {"playlist-clear", nullptr};
+        mpv_command(m_mpv, clearCmd);
+    }
+    m_playing    = false;
+    m_paused     = false;
+    m_realtimeBr = 0;
     emit playbackStopped();
 }
 
@@ -519,11 +690,12 @@ void Player::setVolume(int vol)
     }
 }
 
-void Player::setMode(const QString &mode, bool hp1, bool hp2)
+void Player::setMode(const QString &mode, bool hp1, bool hp2, const QString &soundField)
 {
-    m_mode = mode;
-    m_hp1  = hp1;
-    m_hp2  = hp2;
+    m_mode       = mode;
+    m_hp1        = hp1;
+    m_hp2        = hp2;
+    m_soundField = soundField;
     if (m_playing) {
         applyAudioChain();
     }
@@ -607,38 +779,62 @@ QString Player::getTagArtist() const
 
 QString Player::getInfo(const QString &mode) const
 {
-    if (!m_mpv || !m_playing) return "";
+    if (!m_mpv) return "";
 
-    // コーデック名はmpvから取得
-    char *codec = nullptr;
-    mpv_get_property(m_mpv, "audio-codec-name", MPV_FORMAT_STRING, &codec);
+    // コーデック名：再生中はmpvから、再生前は拡張子から
     QString info;
-    if (codec) { info = QString(codec).toUpper(); mpv_free(codec); }
+    if (m_playing) {
+        char *codec = nullptr;
+        mpv_get_property(m_mpv, "audio-codec-name", MPV_FORMAT_STRING, &codec);
+        if (codec) { info = QString(codec).toUpper(); mpv_free(codec); }
+    } else {
+        if (m_currentIndex < m_playlist.size())
+            info = QFileInfo(m_playlist[m_currentIndex]).suffix().toUpper();
+    }
 
-    // ビットレート・サンプリング周波数・ビット深度はplay()時にキャッシュした値を使用
-    int br   = m_cachedBr;
-    int sr   = m_cachedSr;
-    int bits = m_cachedBits;
-    // 表示用モード：引数で受け取った現在のUIモードを使用（m_modeに依存しない）
-    const QString &dispMode = mode.isEmpty() ? m_mode : mode;
-
-    if (br > 0) info += QString(" | %1 kbps").arg(br);
-
-    // サンプリング周波数表示
-    if (sr > 0) {
-        double srcKhz = sr / 1000.0;
-        bool hiRes = (sr > 48000);
-        if (dispMode == "dsd8") {
-            info += QString(" | %1->352.8 kHz").arg(srcKhz, 0, 'f', 1);
-        } else if (dispMode == "hires4" && !hiRes) {
-            info += QString(" | %1->176.4 kHz").arg(srcKhz, 0, 'f', 1);
-        } else if (dispMode == "loudness" && !hiRes) {
-            info += QString(" | %1->176.4 kHz").arg(srcKhz, 0, 'f', 1);
+    // kbps：demuxer-cache-stateのpacket-bitrateを優先（FLAC等のリアルタイム変動に対応）
+    int br = 0;
+    if (m_playing) {
+        if (m_realtimeBr > 0) {
+            br = m_realtimeBr;
         } else {
-            info += QString(" | %1 kHz").arg(srcKhz, 0, 'f', 1);
+            double mpvBr = 0.0;
+            mpv_get_property(m_mpv, "audio-bitrate", MPV_FORMAT_DOUBLE, &mpvBr);
+            br = (mpvBr > 0) ? static_cast<int>(mpvBr / 1000.0) : m_cachedBr;
         }
     }
-    if (bits > 0) info += QString(" / %1bit").arg(bits);
+
+    // sr/bits はキャッシュ値（onTrackChangedで更新済み）
+    int sr   = m_cachedSr;
+    int bits = m_cachedBits;
+
+    // 表示用モード
+    const QString &dispMode = mode.isEmpty() ? m_mode : mode;
+    bool hiRes = (sr > 48000);
+
+    // 出力kHz：モードに連動
+    double outKhz = 0.0;
+    int    outBits = 24; // s24固定出力
+    if (sr > 0) {
+        if (dispMode == "dsd8") {
+            outKhz = 352.8;
+        } else if (dispMode == "hires4" && !hiRes) {
+            outKhz = 176.4;
+        } else if (dispMode == "loudness" && !hiRes) {
+            outKhz = 176.4;
+        } else {
+            // pure / ハイレゾ：ソースのkHzをそのまま
+            outKhz = sr / 1000.0;
+            // ピュアでCD音源の場合のみ16bit表示
+            if (dispMode == "pure" && !hiRes && bits > 0)
+                outBits = bits;
+        }
+    }
+
+    info += QString(" | %1 kbps").arg(br);
+    if (outKhz > 0)
+        info += QString(" | %1 kHz").arg(outKhz, 0, 'f', 1);
+    info += QString(" / %1bit").arg(outBits);
     return info;
 }
 
@@ -646,6 +842,8 @@ QString Player::getCoverArt() const
 {
     if (m_currentIndex >= m_playlist.size()) return {};
     QString fp = m_playlist[m_currentIndex];
+    // ★ CD再生中はアートなし
+    if (fp.startsWith("cdda://")) return {};
     QFileInfo fi(fp);
     QString ext = fi.suffix().toLower();
 
@@ -828,6 +1026,13 @@ QString Player::fileAt(int i) const
 {
     if (i >= 0 && i < m_playlist.size())
         return QFileInfo(m_playlist[i]).fileName();
+    return {};
+}
+
+QString Player::filePathAt(int i) const
+{
+    if (i >= 0 && i < m_playlist.size())
+        return m_playlist[i];
     return {};
 }
 

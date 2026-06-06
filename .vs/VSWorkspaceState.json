@@ -1,0 +1,13 @@
+{
+  "OutputFoldersPerTargetSystem": {
+    "Local Machine": [
+      "build"
+    ]
+  },
+  "ExpandedNodes": [
+    "",
+    "\\resources",
+    "\\src"
+  ],
+  "PreviewInSolutionExplorer": false
+}

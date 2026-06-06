@@ -234,6 +234,30 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
                 };
                 m_timeLabel->setText(fmt(relPosMs) + " / " + fmt(lenMs));
             }
+
+            // ③ 現在再生中トラックをpositionから逆算してUI同期
+            {
+                // posMs（絶対位置）から現在トラックを特定
+                int detectedTrack = m_cdCurrentTrack;
+                for (int i = 0; i < m_discInfo.tracks.size(); ++i) {
+                    double tStart = (m_discInfo.tracks[i].startSector + 150) / 75.0 * 1000.0;
+                    double tEnd   = (i + 1 < m_discInfo.tracks.size())
+                        ? (m_discInfo.tracks[i+1].startSector + 150) / 75.0 * 1000.0
+                        : (m_discInfo.totalSectors + 150) / 75.0 * 1000.0;
+                    if (posMs >= tStart && posMs < tEnd) {
+                        detectedTrack = i;
+                        break;
+                    }
+                }
+                if (detectedTrack != m_cdCurrentTrack && detectedTrack >= 0 && detectedTrack < m_cdTrackCount) {
+                    m_cdCurrentTrack = detectedTrack;
+                    m_playlist->setCurrentRow(detectedTrack);
+                    QString tname = m_playlist->item(detectedTrack)
+                        ? m_playlist->item(detectedTrack)->text()
+                        : QString("Track %1").arg(detectedTrack + 1);
+                    setWindowTitle(jp("Always Player  v6.0.0  -  CD  -  ") + tname);
+                }
+            }
             return;
         }
 
@@ -769,6 +793,26 @@ void MainWindow::setupUI()
     connect(m_seekSlider, &QSlider::sliderPressed,  [this]{ m_seekDragging = true; });
     connect(m_seekSlider, &QSlider::sliderReleased, [this]{
         m_seekDragging = false;
+        if (m_isCdMode && m_mciOpen) {
+            // MCI シーク：現在トラックの開始位置＋スライダー比率でシーク
+            mciSendStringW(L"set cd time format milliseconds", nullptr, 0, nullptr);
+            wchar_t lenBuf[64] = {}, startBuf[64] = {};
+            QString lenCmd   = QString("status cd length track %1").arg(m_cdCurrentTrack + 1);
+            QString startCmd = QString("status cd position track %1").arg(m_cdCurrentTrack + 1);
+            mciSendStringW(reinterpret_cast<LPCWSTR>(lenCmd.utf16()),   lenBuf,   64, nullptr);
+            mciSendStringW(reinterpret_cast<LPCWSTR>(startCmd.utf16()), startBuf, 64, nullptr);
+            double lenMs   = QString::fromWCharArray(lenBuf).trimmed().toDouble();
+            double startMs = QString::fromWCharArray(startBuf).trimmed().toDouble();
+            if (lenMs > 0) {
+                double seekMs = startMs + lenMs * m_seekSlider->value() / 1000.0;
+                // MCIはseekではなくplay from で位置指定再生
+                QString playCmd = QString("play cd from %1").arg(static_cast<long long>(seekMs));
+                mciSendStringW(reinterpret_cast<LPCWSTR>(playCmd.utf16()), nullptr, 0, nullptr);
+                m_cdPaused = false;
+            }
+            mciSendStringW(L"set cd time format tmsf", nullptr, 0, nullptr);
+            return;
+        }
         double duration = 0.0;
         mpv_get_property(m_player->mpvHandle(), "duration", MPV_FORMAT_DOUBLE, &duration);
         if (duration > 0) {

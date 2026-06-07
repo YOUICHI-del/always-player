@@ -130,14 +130,16 @@ void Player::mpvEventLoop()
                 }
             }
 
-            // ★ playlist-pos変化 → CD再生中はtrackChangedを発火
+            // ★ playlist-pos変化 → CD再生中のみtrackChangedを発火
+            // ファイル再生はreplace方式のためplaylist-posは常に0になるので無視
             if (prop && strcmp(prop->name, "playlist-pos") == 0 &&
-                prop->format == MPV_FORMAT_INT64) {
+                prop->format == MPV_FORMAT_INT64 &&
+                !m_playlist.isEmpty() && m_playlist[0].startsWith("cdda://")) {
                 int64_t pos = *(int64_t*)prop->data;
                 if (pos >= 0 && pos != m_currentIndex) {
                     m_currentIndex = static_cast<int>(pos);
                     int capturedIndex = m_currentIndex;
-                    qDebug() << "[Player] playlist-pos changed:" << capturedIndex;
+                    qDebug() << "[Player] playlist-pos changed (CD):" << capturedIndex;
                     QMetaObject::invokeMethod(this, [this, capturedIndex]{
                         emit trackChanged(capturedIndex, QString(), QString(), QString());
                     }, Qt::QueuedConnection);
@@ -537,8 +539,13 @@ QtConcurrent::run([this, capturedFile, capturedIndex]{
         tagTitle = QFileInfo(capturedFile).completeBaseName();
 
     // キャッシュ更新とシグナル発行はUIスレッドで
+    // ★ 現在のインデックスと一致する場合のみ発行（古いスレッド結果を捨てる）
     QMetaObject::invokeMethod(this, [this, capturedIndex, capturedFile,
                                       tagTitle, tagArtist, br, sr, bits]{
+        if (capturedIndex != m_currentIndex) {
+            qDebug() << "[Player] trackChanged discarded (stale):" << capturedIndex << "current:" << m_currentIndex;
+            return;
+        }
         m_cachedBr   = br;
         m_cachedSr   = sr;
         m_cachedBits = bits;

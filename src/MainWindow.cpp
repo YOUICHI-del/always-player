@@ -1275,13 +1275,12 @@ void MainWindow::startCdTrackStream(int trackIndex)
 
     m_cdPaused = false;   // ★ 新トラック開始時は一時停止解除
 
-    // 前の再生を停止（m_cdCurrentTrackをリセットする前に停止）
-    stopCdStream();
-
-    // stopCdStream後にtrackIndexを設定（stopCdStreamがリセットするため）
+    // ★ stopCdStream前にtrackIndexを設定（infoTimerの誤検知を防ぐ）
     m_cdCurrentTrack = trackIndex;
-    // プレイリスト表示を即時更新（1曲目に戻る表示を防ぐ）
     m_playlist->setCurrentRow(trackIndex);
+
+    // 前の再生を停止
+    stopCdStream();
 
     // ★ MCI でCDを開く（時間フォーマットをトラックに設定）
     QString openCmd = QString("open %1 type cdaudio alias cd").arg(m_cdDrive);

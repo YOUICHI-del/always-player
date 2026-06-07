@@ -705,6 +705,7 @@ void MainWindow::setupUI()
     connect(m_stopBtn, &QPushButton::clicked, [this]{
         if (m_isCdMode) {
             stopCdStream();
+            m_mciPlaying = false;
             m_cdPaused = false;
             m_seekSlider->setValue(0);
             m_timeLabel->setText("0:00 / 0:00");
@@ -1431,9 +1432,26 @@ void MainWindow::onSelectFile()
         m_player->setCachedInfo(br, sr, bits);
         bool hiRes = (sr > 48000);
         QString autoMode = hiRes ? "pure" : "dsd8";
-        for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
-            it.value()->setChecked(it.key() == autoMode);
-            it.value()->setEnabled(!hiRes || it.key() == "pure");
+        {
+            QMap<QString,QString> hiResLabels;
+            hiResLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
+            hiResLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc" "DSD x8  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
+            hiResLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
+            QMap<QString,QString> origLabels;
+            origLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4");
+            origLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc") + "DSD x8";
+            origLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9");
+            for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
+                it.value()->setChecked(it.key() == autoMode);
+                bool enabled = !hiRes || it.key() == "pure";
+                it.value()->setEnabled(enabled);
+                if (it.key() != "pure") {
+                    if (hiRes && hiResLabels.contains(it.key()))
+                        it.value()->setText(hiResLabels[it.key()]);
+                    else if (origLabels.contains(it.key()))
+                        it.value()->setText(origLabels[it.key()]);
+                }
+            }
         }
         updateModeDesc(autoMode);
         m_player->setModeQuiet(autoMode);
@@ -1444,6 +1462,16 @@ void MainWindow::onSelectFile()
 void MainWindow::loadFolder(const QString &path, bool autoPlay)
 {
     m_isCdMode = false;  // ★ フォルダ読み込み時はCDモードを解除
+    // モードボタンのテキストを元に戻す（ハイレゾ/CD表示から復元）
+    {
+        QMap<QString,QString> origLabels;
+        origLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4");
+        origLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc") + "DSD x8";
+        origLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9");
+        for (auto it = origLabels.begin(); it != origLabels.end(); ++it)
+            if (m_modeBtns.contains(it.key()))
+                m_modeBtns[it.key()]->setText(it.value());
+    }
     m_currentFolder = path;
     m_player->loadFolder(path);
     m_playlist->clear();
@@ -1509,9 +1537,26 @@ void MainWindow::loadFolder(const QString &path, bool autoPlay)
         // ハイレゾ判定→モードボタン更新
         bool hiRes = (sr > 48000);
         QString autoMode = hiRes ? "pure" : "dsd8";
-        for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
-            it.value()->setChecked(it.key() == autoMode);
-            it.value()->setEnabled(!hiRes || it.key() == "pure");
+        {
+            QMap<QString,QString> hiResLabels;
+            hiResLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
+            hiResLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc" "DSD x8  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
+            hiResLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
+            QMap<QString,QString> origLabels;
+            origLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4");
+            origLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc") + "DSD x8";
+            origLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9");
+            for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
+                it.value()->setChecked(it.key() == autoMode);
+                bool enabled = !hiRes || it.key() == "pure";
+                it.value()->setEnabled(enabled);
+                if (it.key() != "pure") {
+                    if (hiRes && hiResLabels.contains(it.key()))
+                        it.value()->setText(hiResLabels[it.key()]);
+                    else if (origLabels.contains(it.key()))
+                        it.value()->setText(origLabels[it.key()]);
+                }
+            }
         }
         updateModeDesc(autoMode);
         m_player->setModeQuiet(autoMode);
@@ -1624,9 +1669,26 @@ void MainWindow::onTrackChanged(int index, const QString &filename,
             QString autoMode = hiRes ? "pure" : "dsd8";
 
             // ボタン状態更新
-            for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
-                it.value()->setChecked(it.key() == autoMode);
-                it.value()->setEnabled(!hiRes || it.key() == "pure");
+            {
+                QMap<QString,QString> hiResLabels;
+                hiResLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
+                hiResLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc" "DSD x8  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
+                hiResLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
+                QMap<QString,QString> origLabels;
+                origLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4");
+                origLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc") + "DSD x8";
+                origLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9");
+                for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
+                    it.value()->setChecked(it.key() == autoMode);
+                    bool enabled = !hiRes || it.key() == "pure";
+                    it.value()->setEnabled(enabled);
+                    if (it.key() != "pure") {
+                        if (hiRes && hiResLabels.contains(it.key()))
+                            it.value()->setText(hiResLabels[it.key()]);
+                        else if (origLabels.contains(it.key()))
+                            it.value()->setText(origLabels[it.key()]);
+                    }
+                }
             }
             updateModeDesc(autoMode);
 

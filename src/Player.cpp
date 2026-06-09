@@ -1,5 +1,6 @@
 #include "Player.h"
 #include <shlwapi.h>  // StrCmpLogicalW（自然順ソート）
+#include <intrin.h>   // __cpuid（CPUスペック判定）
 #pragma comment(lib, "shlwapi.lib")
 #include <cmath>
 #include <algorithm>
@@ -40,7 +41,9 @@ bool Player::init()
 
     mpv_set_option_string(m_mpv, "video",        "no");
     mpv_set_option_string(m_mpv, "really-quiet", "yes");
-    mpv_set_option_string(m_mpv, "cache",        "no");
+    mpv_set_option_string(m_mpv, "cache",        "yes");
+    mpv_set_option_string(m_mpv, "demuxer-max-bytes",      "512MiB");  // 最大512MBをRAMに展開
+    mpv_set_option_string(m_mpv, "demuxer-readahead-secs", "300");     // 300秒先読み（曲丸ごと）
     mpv_set_option_string(m_mpv, "audio-buffer", "0.1");
     mpv_set_option_string(m_mpv, "demuxer",      "lavf"); // packet-bitrateを返す曲を増やす
 
@@ -185,23 +188,41 @@ void Player::applyAudioChain()
     }
     bool isHiRes = (srcSr > 48000);
 
+    // ── CPUスペックに応じたprecision自動判定
+    // AVX-512 → precision=32 / AVX2 → precision=28 / SSE2 → precision=24
+    static const int s_precision = []() -> int {
+        int info[4] = {};
+        __cpuid(info, 0);
+        int nIds = info[0];
+        if (nIds >= 7) {
+            __cpuidex(info, 7, 0);
+            if (info[1] & (1 << 16)) return 32;  // AVX-512F
+            if (info[1] & (1 <<  5)) return 28;  // AVX2
+        }
+        __cpuid(info, 1);
+        if (info[3] & (1 << 26)) return 24;  // SSE2
+        return 24;
+    }();
+    const QString RESAMP = QString("aresample=resampler=swr:precision=%1:cutoff=0.9998")
+                           .arg(s_precision);
+
     if (m_mode == "hires4") {
         if (isHiRes) {
             // ハイレゾはそのまま（アップサンプリングしない）
             mpv_set_property_string(m_mpv, "audio-samplerate", "0");
         } else {
-            af = "scaletempo2";
+            af = RESAMP;
             mpv_set_property_string(m_mpv, "audio-samplerate", "176400");
         }
     } else if (m_mode == "dsd8") {
-        af = "scaletempo2";
+        af = RESAMP;
         mpv_set_property_string(m_mpv, "audio-samplerate", "352800");
     } else if (m_mode == "loudness") {
         if (isHiRes) {
-            af = "scaletempo2,lavfi=loudnorm=I=-14:TP=-1:LRA=11";
+            af = "lavfi=loudnorm=I=-14:TP=-1:LRA=11";
             mpv_set_property_string(m_mpv, "audio-samplerate", "0");
         } else {
-            af = "scaletempo2,lavfi=loudnorm=I=-14:TP=-1:LRA=11";
+            af = RESAMP + ",lavfi=loudnorm=I=-14:TP=-1:LRA=11";
             mpv_set_property_string(m_mpv, "audio-samplerate", "176400");
         }
     } else {
@@ -379,7 +400,7 @@ void Player::loadCdStream(const QString &filePath)
 
     // ★ シンプルに通常WAVとして扱う
     // まず音を出すことを優先（チューニングは後で）
-    mpv_set_property_string(m_mpv, "cache", "no");
+    // RAM展開再生（init時に設定済み）
 
     QByteArray path = filePath.toUtf8();
     const char *cmd[] = {"loadfile", path.constData(), "replace", nullptr};

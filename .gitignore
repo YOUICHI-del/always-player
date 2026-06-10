@@ -1,0 +1,8 @@
+﻿build/
+*.msi
+*.wixobj
+*.wixpdb
+
+.vs/
+*.ipch
+build/

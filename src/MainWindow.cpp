@@ -471,7 +471,9 @@ void MainWindow::publishRemoteStatus()
     if (m_isCdMode) {
         if (m_cdPaused) state = "paused";
         else if (m_mciPlaying) state = "playing";
-    } else if (m_player->isPlaying()) {
+    } else if (m_player->isPlaying() || m_player->isPaused()) {
+        // ★ Playerは一時停止中 m_playing=false / m_paused=true になるため、
+        //   isPlaying()だけで判定すると一時停止が「停止」に見えてしまう
         state = m_player->isPaused() ? "paused" : "playing";
         if (m_player->isUsingNewEngineNow()) {
             pos = m_player->getPosition();
@@ -503,11 +505,15 @@ void MainWindow::publishRemoteStatus()
         {"artist", m_subTitle ? m_subTitle->text() : QString()},
         {"index",  m_isCdMode ? m_cdCurrentTrack : m_player->currentIndex()},
         {"total",  m_isCdMode ? m_cdTrackCount   : m_player->total()},
-        {"pos",    qRound(pos * 10) / 10.0},   // 0.1秒単位（細かすぎる差分で毎回送らない）
-        {"dur",    qRound(dur * 10) / 10.0},
+        {"pos",    qRound(pos)},   // 1秒単位（スマホ側で秒表示するのに十分。通信量を抑える）
+        {"dur",    qRound(dur)},
         {"volume", m_volSlider ? m_volSlider->value() : 100},
         {"cd",     m_isCdMode},
         {"artId",  double(art.isNull() ? 0 : m_remoteArtId)},
+        // 診断用（Player内部のフラグ。一時停止の判定確認のため）
+        {"dbg", QString("playing=%1 paused=%2 newEngine=%3")
+                    .arg(int(m_player->isPlaying())).arg(int(m_player->isPaused()))
+                    .arg(int(m_player->isUsingNewEngineNow()))},
     });
 }
 

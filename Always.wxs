@@ -5,7 +5,7 @@
       Id="*"
       Name="Always Player"
       Language="1033"
-      Version="7.0.0.0"
+      Version="9.0.0.0"
       Manufacturer="YOUICHI SAIJO"
       UpgradeCode="F09C8124-7E68-4834-A489-24CBC5D1A305">
 
@@ -81,17 +81,11 @@
       <Component Id="cmp_Qt6Network" Guid="{B57E854A-FD8C-4B08-8D01-F8C4607821C1}" Win64="yes">
         <File Id="fil_Qt6Network" KeyPath="yes" Source="$(var.SourceDir)\Qt6Network.dll" />
       </Component>
+      <Component Id="cmp_Qt6Concurrent" Guid="{5E3B7C21-9A4D-4F6E-8B1C-2D7A9E4F6C30}" Win64="yes">
+        <File Id="fil_Qt6Concurrent" KeyPath="yes" Source="$(var.SourceDir)\Qt6Concurrent.dll" />
+      </Component>
       <Component Id="cmp_Qt6Svg" Guid="{2769CAA1-2A3A-4CC6-9895-E1AF5FCA175E}" Win64="yes">
         <File Id="fil_Qt6Svg" KeyPath="yes" Source="$(var.SourceDir)\Qt6Svg.dll" />
-      </Component>
-      <Component Id="cmp_d3dcompiler" Guid="{3293016B-C09A-4D62-98E8-25F0A35A1910}" Win64="yes">
-        <File Id="fil_d3dcompiler" KeyPath="yes" Source="$(var.SourceDir)\d3dcompiler_47.dll" />
-      </Component>
-      <Component Id="cmp_opengl32sw" Guid="{EF9BFB53-E9BA-4B06-B3AF-6F88306472B7}" Win64="yes">
-        <File Id="fil_opengl32sw" KeyPath="yes" Source="$(var.SourceDir)\opengl32sw.dll" />
-      </Component>
-      <Component Id="cmp_icuuc" Guid="{9B9DFF80-6255-4ED6-B53E-86AB2518153F}" Win64="yes">
-        <File Id="fil_icuuc" KeyPath="yes" Source="$(var.SourceDir)\icuuc.dll" />
       </Component>
       <Component Id="cmp_msvcp140" Guid="{A1234567-0001-0001-0001-000000000001}" Win64="yes">
         <File Id="fil_msvcp140" KeyPath="yes" Source="$(var.SourceDir)\MSVCP140.dll" />

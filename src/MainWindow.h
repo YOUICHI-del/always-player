@@ -23,6 +23,8 @@
 #include "RingBuffer.h"
 #include "CdMetaFetcher.h"
 
+class RemoteServer;
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -81,6 +83,11 @@ private:
     void stopIfCd();
     void stopCdStream();
 
+    // ★ v9: Always Player for Android からのリモコン(Always Link)
+    void setupRemote();
+    void onRemoteCommand(const QString &cmd, double value);
+    void publishRemoteStatus();
+
     Player         *m_player   = nullptr;
     TrayManager    *m_tray     = nullptr;
     VUMeter        *m_vuMeter  = nullptr;
@@ -108,6 +115,20 @@ private:
     QPushButton *m_bitPerfectBtn  = nullptr;
     QAction     *m_bpActOff       = nullptr;
     bool         m_bpManualOff    = false;   // ★ 手動OFFフラグ（true時は自動BitPerfectをスキップ）
+    // ★ 「16種類の手動ビットパーフェクト」メニューで特定のレート/ビット数を
+    //   選んだかどうかのフラグ。true の間は、曲が変わっても onTrackChanged() 内の
+    //   ハイレゾ自動モード判定（dsd8/pure切り替え）で上書きせず、ここに記録した
+    //   レート/ビット数をそのまま維持する。
+    //   （このフラグが無かったため、手動選択が次の曲で352.8kHz(dsd8)に
+    //     勝手に戻ってしまうバグがあった。）
+    bool         m_bpManualRatePinned = false;
+    int          m_pinnedBpRate   = 0;
+    int          m_pinnedBpBits   = 0;
+    // ★ 曲間ノイズ対策：直前にWASAPI排他へ実際に適用した出力レート/ビット数を記録。
+    //   次の曲も同じ値なら audio-exclusive/audio-samplerate の再設定（＝デバイス
+    //   再初期化）自体をスキップし、無用な曲間ノイズ・無音を防ぐ。
+    int          m_lastAppliedRate = -1;
+    int          m_lastAppliedBits = -1;
     QString      m_currentArtist;
     QString      m_savedPowerPlan;  // INIから読み込んだ電源プランGUID
 
@@ -171,6 +192,12 @@ private:
     std::unique_ptr<CDReader>       m_cdReader;
     std::unique_ptr<CdStreamWriter> m_cdWriter;
     CdMetaFetcher  *m_cdMetaFetcher = nullptr;
+
+    // ★ リモコン
+    RemoteServer   *m_remote        = nullptr;
+    QTimer         *m_remoteTimer   = nullptr;
+    qint64          m_remoteArtKey  = 0;   // 最後に送ったジャケットの QPixmap::cacheKey
+    qint64          m_remoteArtId   = 0;   // スマホへ渡す画像番号（送るたびに+1）
 
     // アルバムブラウザ
     QWidget      *m_mainContent      = nullptr;

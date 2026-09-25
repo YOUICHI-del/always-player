@@ -3,6 +3,8 @@
 #include <QProxyStyle>
 #include <QStyleOption>
 #include "CdMetaFetcher.h"
+#include "RemoteServer.h"
+#include <QBuffer>
 #include <mpv/client.h>
 #include <QRadioButton>
 #include <QCheckBox>
@@ -56,6 +58,7 @@
 #include <taglib/id3v2tag.h>
 #include <taglib/mpegfile.h>
 #include <taglib/flacfile.h>
+#include <taglib/xiphcomment.h>
 #include <taglib/mp4file.h>
 #include <taglib/mp4tag.h>
 
@@ -315,7 +318,7 @@ static QString searchWikipediaUrl(const QString &artist)
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 {
-    setWindowTitle("Always Player  v7.0.0");
+    setWindowTitle("Always Player  v9.0.0");
     setWindowIcon(QIcon(":/icons/Always.ico"));
     setMinimumSize(900, 700);
 
@@ -377,8 +380,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
             // シークスライダー＆時間表示の更新（ドラッグ中は止める）
             if (!m_seekDragging) {
                 double pos = 0.0, duration = 0.0;
-                mpv_get_property(m_player->mpvHandle(), "time-pos",  MPV_FORMAT_DOUBLE, &pos);
-                mpv_get_property(m_player->mpvHandle(), "duration",  MPV_FORMAT_DOUBLE, &duration);
+                if (m_player->isUsingNewEngineNow()) {
+                    // ★ 新エンジン(FLAC/WASAPI排他)再生中はmpvプロパティを持たないため、
+                    //   Player側の経過時間トラッキングから取得する。
+                    pos      = m_player->getPosition();
+                    duration = m_player->getDuration();
+                } else {
+                    mpv_get_property(m_player->mpvHandle(), "time-pos",  MPV_FORMAT_DOUBLE, &pos);
+                    mpv_get_property(m_player->mpvHandle(), "duration",  MPV_FORMAT_DOUBLE, &duration);
+                }
                 if (duration > 0) {
                     m_seekSlider->setValue(static_cast<int>(pos / duration * 1000));
                     auto fmt = [](double sec) -> QString {
@@ -391,16 +401,115 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
             }
         }
     });
-    m_infoTimer->start(500);  // MCI用は500msで十分
+    // ★ シークバー描画のポーリング間隔。以前は500msだったが、ギャップレス遷移時に
+    //   Player側の内部タイマー（100ms間隔）で計算した「実質満タン」の瞬間を、
+    //   この描画ポーリングが500ms周期のため捉え損ね、シークバーが最後まで
+    //   伸びきる前に次曲へ切り替わって見えてしまう不具合があった
+    //   （実測ログではPlayer側のgetPosition()自体は切替直前にほぼ満タン
+    //    〜満タンに達していることを確認済み。ズレは純粋にこの描画側の
+    //    ポーリング粒度が原因）。100msに短縮してPlayer側の内部タイマーと
+    //    同程度の精度にし、見た目のズレを解消する。
+    m_infoTimer->start(100);
 
     loadFavorites();
 
     QString last = m_player->loadLastFolder();
     if (!last.isEmpty() && QDir(last).exists())
         loadFolder(last, false);  // 起動時は自動再生しない
+
+    setupRemote();
 }
 
 MainWindow::~MainWindow() {}
+
+// ============================================================================
+//  リモコン(Always Link)
+//  スマホからの操作は、画面のボタンを押したのと同じ経路(click())で実行する。
+//  CD再生中/ファイル再生中の分岐やUI更新をボタン側の処理と完全に共通化するため。
+// ============================================================================
+void MainWindow::setupRemote()
+{
+    m_remote = new RemoteServer(this);
+    connect(m_remote, &RemoteServer::commandReceived, this, &MainWindow::onRemoteCommand);
+    connect(m_remote, &RemoteServer::clientConnected, this, &MainWindow::publishRemoteStatus);
+    if (!m_remote->start())
+        qDebug() << "[Remote] disabled (port busy)";
+
+    // 状態の送信は500msごと。内容が変わらなければRemoteServer側で送信を省く
+    m_remoteTimer = new QTimer(this);
+    connect(m_remoteTimer, &QTimer::timeout, this, &MainWindow::publishRemoteStatus);
+    m_remoteTimer->start(500);
+}
+
+void MainWindow::onRemoteCommand(const QString &cmd, double value)
+{
+    if      (cmd == "play")   m_playBtn->click();
+    else if (cmd == "pause")  { if (m_isCdMode ? !m_cdPaused : !m_player->isPaused()) m_pauseBtn->click(); }
+    else if (cmd == "toggle") {
+        const bool playing = m_isCdMode ? (m_mciPlaying && !m_cdPaused)
+                                        : (m_player->isPlaying() && !m_player->isPaused());
+        const bool paused  = m_isCdMode ? m_cdPaused : m_player->isPaused();
+        if (playing || paused) m_pauseBtn->click();   // 再生中⇔一時停止
+        else                   m_playBtn->click();    // 停止中 → 再生
+    }
+    else if (cmd == "stop")   m_stopBtn->click();
+    else if (cmd == "next")   m_nextBtn->click();
+    else if (cmd == "prev")   m_prevBtn->click();
+    else if (cmd == "volume") m_volSlider->setValue(qBound(0, int(value + 0.5), 100));
+    else if (cmd == "seek") {
+        if (!m_isCdMode && m_player->isPlaying() && value >= 0) m_player->seekTo(value);
+    }
+    publishRemoteStatus();
+}
+
+void MainWindow::publishRemoteStatus()
+{
+    if (!m_remote || m_remote->clientCount() == 0) return;   // 誰もつないでいなければ何もしない
+
+    QString state = "stopped";
+    double pos = 0.0, dur = 0.0;
+    if (m_isCdMode) {
+        if (m_cdPaused) state = "paused";
+        else if (m_mciPlaying) state = "playing";
+    } else if (m_player->isPlaying()) {
+        state = m_player->isPaused() ? "paused" : "playing";
+        if (m_player->isUsingNewEngineNow()) {
+            pos = m_player->getPosition();
+            dur = m_player->getDuration();
+        } else {
+            mpv_get_property(m_player->mpvHandle(), "time-pos", MPV_FORMAT_DOUBLE, &pos);
+            mpv_get_property(m_player->mpvHandle(), "duration", MPV_FORMAT_DOUBLE, &dur);
+        }
+    }
+
+    // ジャケット：画面に出ている画像をそのまま送る（CDのネット取得画像も含む）
+    const QPixmap art = m_jacket ? m_jacket->pixmap() : QPixmap();
+    const qint64 key = art.isNull() ? 0 : art.cacheKey();
+    if (key != m_remoteArtKey) {
+        m_remoteArtKey = key;
+        QByteArray jpeg;
+        if (!art.isNull()) {
+            QBuffer buf(&jpeg);
+            buf.open(QIODevice::WriteOnly);
+            art.scaled(400, 400, Qt::KeepAspectRatio, Qt::SmoothTransformation).save(&buf, "JPG", 85);
+            ++m_remoteArtId;
+        }
+        m_remote->publishArt(art.isNull() ? 0 : m_remoteArtId, jpeg);
+    }
+
+    m_remote->publishStatus(QJsonObject{
+        {"state",  state},
+        {"title",  m_title ? m_title->text() : QString()},
+        {"artist", m_subTitle ? m_subTitle->text() : QString()},
+        {"index",  m_isCdMode ? m_cdCurrentTrack : m_player->currentIndex()},
+        {"total",  m_isCdMode ? m_cdTrackCount   : m_player->total()},
+        {"pos",    qRound(pos * 10) / 10.0},   // 0.1秒単位（細かすぎる差分で毎回送らない）
+        {"dur",    qRound(dur * 10) / 10.0},
+        {"volume", m_volSlider ? m_volSlider->value() : 100},
+        {"cd",     m_isCdMode},
+        {"artId",  double(art.isNull() ? 0 : m_remoteArtId)},
+    });
+}
 
 void MainWindow::setupUI()
 {
@@ -670,11 +779,16 @@ void MainWindow::setupUI()
     connect(bpMenu, &QMenu::triggered, this, [this](QAction *act) {
         if (act == m_bpActOff) {
             m_bpManualOff = true;   // ★ 手動OFFを記憶
+            m_bpManualRatePinned = false;  // ★ OFFにしたので固定レートも解除
+            m_player->setManualRateOverride(false);  // ★ Player側のガードも解除
             m_bitPerfectBtn->setText("BitPerfect ▼");
             qDebug() << "[BitPerfect] OFF (manual)";
-            QtConcurrent::run([this]{
+            // ★ 排他モードを解除したので、次にexclusive=yesへ戻すときは
+            //   同一レート判定でスキップされないようキャッシュを無効化する。
+            m_lastAppliedRate = -1;
+            m_lastAppliedBits = -1;
+            QThreadPool::globalInstance()->start([this]{
                 mpv_set_property_string(m_player->mpvHandle(), "audio-exclusive", "no");
-        m_player->setBitPerfectMeter(false);
                 m_player->setBitPerfectMeter(false);
             });
         } else {
@@ -682,10 +796,20 @@ void MainWindow::setupUI()
             QVariantList data = act->data().toList();
             int rate = data[0].toInt();
             int bits = data[1].toInt();
+            // ★ 特定のレート/ビット数を手動で固定選択したので記憶する。
+            //   曲が変わっても、この値を onTrackChanged() が上書きしないようにする。
+            m_bpManualRatePinned = true;
+            m_pinnedBpRate = rate;
+            m_pinnedBpBits = bits;
+            // ★ Player::applyAudioChain()にこの固定を伝え、次の曲でm_modeに
+            //   基づくaudio-samplerateの自動上書きが起きないようにする。
+            m_player->setManualRateOverride(true);
             m_bitPerfectBtn->setText(
                 QString("BitPerfect %1Hz/%2 ▼").arg(rate/1000).arg(bits));
             qDebug() << "[BitPerfect] rate=" << rate << "bits=" << bits;
-            QtConcurrent::run([this, rate]{
+            m_lastAppliedRate = rate;
+            m_lastAppliedBits = bits;
+            QThreadPool::globalInstance()->start([this, rate]{
                 mpv_set_property_string(m_player->mpvHandle(), "audio-exclusive", "yes");
                 m_player->setBitPerfectMeter(true);
                 mpv_set_property_string(m_player->mpvHandle(), "audio-samplerate",
@@ -775,6 +899,10 @@ void MainWindow::setupUI()
         m_modeBtns[modeKeys[i]] = btn;
         connect(btn, &QPushButton::clicked, [this, key=modeKeys[i]]{
             stopIfCd();  // ★ CD再生中なら停止
+            // ★ モードボタンを直接押した場合は、手動固定レート選択を解除し、
+            //   モード連動の自動レート決定に戻す。
+            m_bpManualRatePinned = false;
+            m_player->setManualRateOverride(false);
             // ハイレゾ音源はピュアモードのみ
             bool hiRes = (m_player->cachedSr() > 48000);
             QString actualKey = (key != "pure" && hiRes) ? "pure" : key;
@@ -983,10 +1111,18 @@ void MainWindow::setupUI()
             return;
         }
         double duration = 0.0;
-        mpv_get_property(m_player->mpvHandle(), "duration", MPV_FORMAT_DOUBLE, &duration);
-        if (duration > 0) {
-            double pos = duration * m_seekSlider->value() / 1000.0;
-            mpv_set_property(m_player->mpvHandle(), "time-pos", MPV_FORMAT_DOUBLE, &pos);
+        if (m_player->isUsingNewEngineNow()) {
+            duration = m_player->getDuration();
+            if (duration > 0) {
+                double pos = duration * m_seekSlider->value() / 1000.0;
+                m_player->seekTo(pos);
+            }
+        } else {
+            mpv_get_property(m_player->mpvHandle(), "duration", MPV_FORMAT_DOUBLE, &duration);
+            if (duration > 0) {
+                double pos = duration * m_seekSlider->value() / 1000.0;
+                mpv_set_property(m_player->mpvHandle(), "time-pos", MPV_FORMAT_DOUBLE, &pos);
+            }
         }
     });
 
@@ -1363,7 +1499,7 @@ void MainWindow::playCd(const QString &drive)
     m_stack->setCurrentIndex(0);
 
     if (m_artistInfoBtn) m_artistInfoBtn->setEnabled(false);
-    setWindowTitle(jp("Always Player  v7.0.0  -  CD"));
+    setWindowTitle(jp("Always Player  v9.0.0  -  CD"));
     // ★ バックグラウンドでメタデータ取得開始（再生前はpauseBtn無効）
     // pauseBtn は常に有効（setEnabledによる色変化を避ける）
     m_statusBar->setText(jp("\xe6\xa4\x9c\xe7\xb4\xa2\xe4\xb8\xad... MusicBrainz / iTunes"));
@@ -1589,7 +1725,7 @@ void MainWindow::startCdTrackStream(int trackIndex)
                     m_seekSlider->setValue(0);
                     m_timeLabel->setText("0:00 / 0:00");
                     m_statusBar->setText(">> CD 再生完了");
-                    setWindowTitle(jp("Always Player  v7.0.0  -  CD"));
+                    setWindowTitle(jp("Always Player  v9.0.0  -  CD"));
                 }
             }
         });
@@ -1608,7 +1744,7 @@ void MainWindow::startCdTrackStream(int trackIndex)
     m_subTitle->setText(QString("%1  /  %2").arg(trackIndex + 1).arg(m_cdTrackCount));
     m_playlist->setCurrentRow(trackIndex);
     m_statusBar->setText(">> " + name);
-    setWindowTitle(jp("Always Player  v7.0.0  -  CD  -  ") + name);
+    setWindowTitle(jp("Always Player  v9.0.0  -  CD  -  ") + name);
 
 
 }
@@ -1649,9 +1785,13 @@ void MainWindow::loadFolder(const QString &path, bool autoPlay)
             if (ext == "flac") {
                 TagLib::FLAC::File tf(fp.toStdWString().c_str());
                 if (tf.isValid()) {
-                    if (tf.tag()) {
-                        title  = QString::fromStdString(tf.tag()->title().to8Bit(true));
-                        artist = QString::fromStdString(tf.tag()->artist().to8Bit(true));
+                    // ★ FLACの正規タグはVorbisComment（XiphComment）を優先
+                    if (tf.xiphComment() && !tf.xiphComment()->isEmpty()) {
+                        title  = QString::fromUtf8(tf.xiphComment()->title().toCString(true));
+                        artist = QString::fromUtf8(tf.xiphComment()->artist().toCString(true));
+                    } else if (tf.tag()) {
+                        title  = QString::fromUtf8(tf.tag()->title().toCString(true));
+                        artist = QString::fromUtf8(tf.tag()->artist().toCString(true));
                     }
                     if (tf.audioProperties()) {
                         br   = tf.audioProperties()->bitrate();
@@ -1663,8 +1803,8 @@ void MainWindow::loadFolder(const QString &path, bool autoPlay)
                 TagLib::MP4::File tf(fp.toStdWString().c_str());
                 if (tf.isValid()) {
                     if (tf.tag()) {
-                        title  = QString::fromStdString(tf.tag()->title().to8Bit(true));
-                        artist = QString::fromStdString(tf.tag()->artist().to8Bit(true));
+                        title  = QString::fromUtf8(tf.tag()->title().toCString(true));
+                        artist = QString::fromUtf8(tf.tag()->artist().toCString(true));
                     }
                     if (tf.audioProperties()) {
                         br   = tf.audioProperties()->bitrate();
@@ -1676,8 +1816,8 @@ void MainWindow::loadFolder(const QString &path, bool autoPlay)
                 TagLib::FileRef ref(fp.toStdWString().c_str());
                 if (!ref.isNull()) {
                     if (ref.tag()) {
-                        title  = QString::fromStdString(ref.tag()->title().to8Bit(true));
-                        artist = QString::fromStdString(ref.tag()->artist().to8Bit(true));
+                        title  = QString::fromUtf8(ref.tag()->title().toCString(true));
+                        artist = QString::fromUtf8(ref.tag()->artist().toCString(true));
                     }
                     if (ref.audioProperties()) {
                         br = ref.audioProperties()->bitrate();
@@ -1718,15 +1858,15 @@ void MainWindow::loadFolder(const QString &path, bool autoPlay)
         m_infoLabel->setText(m_player->getInfo(currentMode()));
         // タグ表示
         QString firstFileName = m_player->fileAt(0);
-        m_title->setText(title.isEmpty() ? QFileInfo(fp).completeBaseName() : title);
+        m_title->setText(QFileInfo(fp).completeBaseName());  // ファイル名で統一（他プレイヤーと同仕様）
         QString sub = QString("1  /  %1").arg(m_player->total());
         if (!artist.isEmpty()) sub += "   " + artist;
         m_subTitle->setText(sub);
         m_currentArtist = artist;
         if (m_artistInfoBtn) m_artistInfoBtn->setEnabled(!artist.isEmpty());
         m_playlist->setCurrentRow(0);
-        setWindowTitle(QString::fromUtf8("Always Player  v7.0.0  -  ") + QFileInfo(fp).fileName());
-        m_statusBar->setText(">> " + (title.isEmpty() ? QFileInfo(fp).completeBaseName() : title));
+        setWindowTitle(QString::fromUtf8("Always Player  v9.0.0  -  ") + QFileInfo(fp).fileName());
+        m_statusBar->setText(">> " + QFileInfo(fp).completeBaseName());
     }
 
     // ── アルバムアートを即時更新 ──
@@ -1779,15 +1919,15 @@ void MainWindow::onTrackChanged(int index, const QString &filename,
     // ★ CD再生中はStreamModeで管理するのでスキップ
     if (m_isCdMode) return;
 
-    m_title->setText(title.isEmpty() ? filename.section('.', 0, -2) : title);
+    m_title->setText(filename.section('.', 0, -2));  // ファイル名で統一（他プレイヤーと同仕様）
     QString sub = QString("%1  /  %2").arg(index + 1).arg(m_player->total());
     if (!artist.isEmpty()) sub += "   " + artist;
     m_subTitle->setText(sub);
     m_currentArtist = artist;
     if (m_artistInfoBtn) m_artistInfoBtn->setEnabled(!artist.isEmpty());
     m_playlist->setCurrentRow(index);
-    setWindowTitle(QString::fromUtf8("Always Player  v7.0.0  -  ") + filename);
-    m_statusBar->setText(">> " + (title.isEmpty() ? filename.section('.', 0, -2) : title));
+    setWindowTitle(QString::fromUtf8("Always Player  v9.0.0  -  ") + filename);
+    m_statusBar->setText(">> " + filename.section('.', 0, -2));
 
     // ハイレゾ自動モード切り替え＋disabled制御＋infoLabel更新
     {
@@ -1820,97 +1960,153 @@ void MainWindow::onTrackChanged(int index, const QString &filename,
             // sr/bitsのみ更新、brはplay()のQtConcurrentで設定済みの値を維持
             m_player->setCachedInfo(m_player->cachedBr(), sr, bits);
 
-            // ── BitPerfect自動設定（CD再生時は除外済み）
+            // ── BitPerfect表示更新（常に実行。曲そのものの元の値を表示する）
+            // ★ mpvへの強制変換命令（audio-samplerate等）は、フリーズの原因に
+            //   なったため m_bpManualOff=true の間は呼ばない。表示の更新自体は
+            //   実際の出力と食い違わないよう、手動モードでも常に行う。
             if (sr > 0) {
-                if (m_bpManualOff) {
-                    // ★ 手動OFFが有効：自動設定をスキップ（共有モードを維持）
-                    qDebug() << "[BitPerfect] auto-skip (manual OFF active)";
-                } else {
-                // モードによって出力サンプルレートを決定
-                int outRate = sr;
-                int outBits = (bits > 0) ? bits : 16;
-                QString mode = currentMode();
+                if (m_player->isUsingNewEngineNow()) {
+                    // ── v9: 新エンジン(FLAC/WAV/AIFF/WavPack)はWASAPI排他
+                    // モードで出力する。dsd8/hires4モード時はPlayer内部で
+                    // SincResamplerによりアップサンプリング済みのレートに
+                    // なっているため、newEngineActualSampleRate()は
+                    // （ネイティブではなく）実際の出力レートを返す。
+                    // mpvへの命令は一切呼ばない。
+                    uint32_t newRate = m_player->newEngineActualSampleRate();
+                    uint32_t newBits = m_player->newEngineActualBits();
 
-                if (!m_player->dspOff()) {
-                    if (mode == "dsd8") {
-                        outRate = 352800; outBits = 24;
-                    } else if (mode == "hires4") {
-                        outRate = (sr > 48000) ? sr : 176400; outBits = 24;
-                    } else if (mode == "loudness") {
-                        outRate = (sr > 48000) ? sr : 176400; outBits = 24;
-                    }
-                    // pure: outRate = sr, outBits = bits（そのまま）
-                }
-
-                // 対応するBitPerfectアクションを検索して自動選択
-                QMenu *bpMenu = m_bitPerfectBtn->menu();
-                QAction *matched = nullptr;
-                for (QAction *act : bpMenu->actions()) {
-                    if (act->data().isValid()) {
-                        QVariantList d = act->data().toList();
-                        if (d[0].toInt() == outRate && d[1].toInt() == outBits) {
-                            matched = act;
-                            break;
+                    QMenu *bpMenu2 = m_bitPerfectBtn->menu();
+                    QAction *matched2 = nullptr;
+                    for (QAction *act : bpMenu2->actions()) {
+                        if (act->data().isValid()) {
+                            QVariantList d = act->data().toList();
+                            if (d[0].toInt() == static_cast<int>(newRate) &&
+                                d[1].toInt() == static_cast<int>(newBits)) {
+                                matched2 = act;
+                                break;
+                            }
                         }
                     }
-                }
+                    if (matched2) matched2->setChecked(true);
 
-                if (matched) {
-                    matched->setChecked(true);
+                    m_bitPerfectBtn->setText(
+                        QString("BitPerfect %1kHz/%2 ▼")
+                        .arg(newRate / 1000.0, 0, 'f', newRate % 1000 == 0 ? 0 : 1)
+                        .arg(newBits));
+                    m_player->setBitPerfectMeter(true);
+                } else {
+                    // ── mpv経由（MP3/CD/他フォーマット）：モードに応じて
+                    // 出力サンプルレートを決定する。
+                    //   ピュア      : CD(44.1kHz)はそのまま、ハイレゾは原音のまま
+                    //   ハイレゾ×4  : 44.1kHz→176.4kHz、ハイレゾ音源は原音維持
+                    //   疑似DSD×8   : 352.8kHzへアップサンプル
+                    //   ラウドネス×4: 44.1kHz→176.4kHz＋ラウドネス処理
+                    // 出力ビット深度は常に24bit固定（v7以来の仕様）。
+                    int outRate = sr;
+                    int outBits = 24;
+                    QString mode = currentMode();
+                    bool hiRes = (sr > 48000);
+
+                    if (m_bpManualRatePinned) {
+                        // ★ 「16種類の手動ビットパーフェクト」で特定のレート/ビット数を
+                        //   固定選択している間は、モード(dsd8/hires4/loudness/pure)に
+                        //   よる自動決定を一切行わず、選択値をそのまま使う。
+                        outRate = m_pinnedBpRate;
+                        outBits = m_pinnedBpBits;
+                    } else if (!m_player->dspOff()) {
+                        if (mode == "dsd8") {
+                            outRate = 352800;
+                        } else if (mode == "hires4") {
+                            outRate = hiRes ? sr : 176400;
+                        } else if (mode == "loudness") {
+                            outRate = hiRes ? sr : 176400;
+                        }
+                        // pure: outRate = sr（そのまま、原音維持）
+                    }
+
+                    QMenu *bpMenu = m_bitPerfectBtn->menu();
+                    QAction *matched = nullptr;
+                    for (QAction *act : bpMenu->actions()) {
+                        if (act->data().isValid()) {
+                            QVariantList d = act->data().toList();
+                            if (d[0].toInt() == outRate && d[1].toInt() == outBits) {
+                                matched = act;
+                                break;
+                            }
+                        }
+                    }
+                    if (matched) matched->setChecked(true);
+
                     m_bitPerfectBtn->setText(
                         QString("BitPerfect %1kHz/%2 ▼")
                         .arg(outRate / 1000.0, 0, 'f', outRate % 1000 == 0 ? 0 : 1)
                         .arg(outBits));
-                    QtConcurrent::run([this, outRate]{
-                        mpv_set_property_string(m_player->mpvHandle(), "audio-exclusive", "yes");
-                m_player->setBitPerfectMeter(true);
-                        mpv_set_property_string(m_player->mpvHandle(), "audio-samplerate",
-                            QString::number(outRate).toUtf8().constData());
-                    });
-                } else {
-                    // 対応モードなし → BitPerfect OFF
-                    m_bpActOff->setChecked(true);
-                    m_bitPerfectBtn->setText("BitPerfect ▼");
-                    QtConcurrent::run([this]{
-                        mpv_set_property_string(m_player->mpvHandle(), "audio-exclusive", "no");
-        m_player->setBitPerfectMeter(false);
-                m_player->setBitPerfectMeter(false);
-                    });
-                }
 
-                } // else (!m_bpManualOff)
-            } // if (sr > 0)
-
-            // ハイレゾ判定
-            bool hiRes = (sr > 48000);
-            QString autoMode = hiRes ? "pure" : "dsd8";
-
-            // ボタン状態更新
-            {
-                QMap<QString,QString> hiResLabels;
-                hiResLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
-                hiResLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc" "DSD x8  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
-                hiResLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
-                QMap<QString,QString> origLabels;
-                origLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4");
-                origLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc") + "DSD x8";
-                origLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9");
-                for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
-                    it.value()->setChecked(it.key() == autoMode);
-                    bool enabled = !hiRes || it.key() == "pure";
-                    it.value()->setEnabled(enabled);
-                    if (it.key() != "pure") {
-                        if (hiRes && hiResLabels.contains(it.key()))
-                            it.value()->setText(hiResLabels[it.key()]);
-                        else if (origLabels.contains(it.key()))
-                            it.value()->setText(origLabels[it.key()]);
+                    // ★ mpvへの強制変換命令は、手動OFF中は呼ばない
+                    //   （以前フリーズの原因になったため）。
+                    // ★ 曲間ノイズ対策：前の曲と出力レート/ビット数が同じ場合は
+                    //   audio-exclusive/audio-samplerate の再設定自体をスキップする。
+                    //   同じ値でも再設定するとmpv内部でWASAPI排他ストリームが
+                    //   一度閉じて開き直され、曲間に過渡的なノイズ・無音区間が
+                    //   生じるため（フォーマットが変わらない限り音質上のメリットはない）。
+                    if (!m_bpManualOff) {
+                        if (outRate == m_lastAppliedRate && outBits == m_lastAppliedBits) {
+                            m_player->setBitPerfectMeter(true);
+                            qDebug() << "[BitPerfect] reset skipped (same rate/bits as previous track):"
+                                     << outRate << outBits;
+                        } else {
+                            m_lastAppliedRate = outRate;
+                            m_lastAppliedBits = outBits;
+                            QThreadPool::globalInstance()->start([this, outRate]{
+                                mpv_set_property_string(m_player->mpvHandle(), "audio-exclusive", "yes");
+                                m_player->setBitPerfectMeter(true);
+                                mpv_set_property_string(m_player->mpvHandle(), "audio-samplerate",
+                                    QString::number(outRate).toUtf8().constData());
+                            });
+                        }
+                    } else {
+                        m_player->setBitPerfectMeter(true);
+                        qDebug() << "[BitPerfect] display-only (manual OFF active, mpv command skipped)";
                     }
                 }
-            }
-            updateModeDesc(autoMode);
+            } // if (sr > 0)
 
-            // モードを実際に切り替え（DSP処理も反映）
-            m_player->setMode(autoMode, m_hp1On, m_hp2On, m_soundField);
+            // ★ 「16種類の手動ビットパーフェクト」を固定選択中は、以下の
+            //   ハイレゾ自動モード切り替え（dsd8/pureへの強制変更）を一切行わない。
+            //   これを無条件に実行していたため、手動選択が次の曲で352.8kHz(dsd8)
+            //   に勝手に戻ってしまうバグがあった。
+            if (!m_bpManualRatePinned) {
+                // ハイレゾ判定
+                bool hiRes = (sr > 48000);
+                QString autoMode = hiRes ? "pure" : "dsd8";
+
+                // ボタン状態更新
+                {
+                    QMap<QString,QString> hiResLabels;
+                    hiResLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
+                    hiResLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc" "DSD x8  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
+                    hiResLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
+                    QMap<QString,QString> origLabels;
+                    origLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4");
+                    origLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc") + "DSD x8";
+                    origLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9");
+                    for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
+                        it.value()->setChecked(it.key() == autoMode);
+                        bool enabled = !hiRes || it.key() == "pure";
+                        it.value()->setEnabled(enabled);
+                        if (it.key() != "pure") {
+                            if (hiRes && hiResLabels.contains(it.key()))
+                                it.value()->setText(hiResLabels[it.key()]);
+                            else if (origLabels.contains(it.key()))
+                                it.value()->setText(origLabels[it.key()]);
+                        }
+                    }
+                }
+                updateModeDesc(autoMode);
+
+                // モードを実際に切り替え（DSP処理も反映）
+                m_player->setMode(autoMode, m_hp1On, m_hp2On, m_soundField);
+            }
 
             // infoLabel即時更新
             m_infoLabel->setText(m_player->getInfo(currentMode()));
@@ -2236,7 +2432,7 @@ void MainWindow::scheduleSave()
             }
             m_iniDirty = false;
             // バックグラウンドスレッドには引数だけ渡す（this経由でメンバーを読むのはNG）
-            QtConcurrent::run([this, sfSnapshot, bpOn, bpRate, bpBits] {
+            QThreadPool::globalInstance()->start([this, sfSnapshot, bpOn, bpRate, bpBits] {
                 writeFavoritesToDisk({}, sfSnapshot, bpOn, bpRate, bpBits);
             });
         });
@@ -2427,7 +2623,15 @@ void MainWindow::loadFavorites()
                         QString("BitPerfect %1kHz/%2 ▼")
                         .arg(bpRate / 1000.0, 0, 'f', bpRate % 1000 == 0 ? 0 : 1)
                         .arg(bpBits));
-                    QtConcurrent::run([this, bpRate]{
+                    m_lastAppliedRate = bpRate;
+                    m_lastAppliedBits = bpBits;
+                    // ★ 起動時に保存済みの固定レートを復元した場合も、
+                    //   曲が変わるたびに踏み潰されないよう固定フラグを立てる。
+                    m_bpManualRatePinned = true;
+                    m_pinnedBpRate = bpRate;
+                    m_pinnedBpBits = bpBits;
+                    m_player->setManualRateOverride(true);
+                    QThreadPool::globalInstance()->start([this, bpRate]{
                         mpv_set_property_string(m_player->mpvHandle(), "audio-exclusive", "yes");
                 m_player->setBitPerfectMeter(true);
                         mpv_set_property_string(m_player->mpvHandle(), "audio-samplerate",
@@ -2439,6 +2643,8 @@ void MainWindow::loadFavorites()
         }
     } else {
         m_bpManualOff = true;   // ★ OFFで保存されていたので手動OFFフラグを立てる
+        m_bpManualRatePinned = false;
+        m_player->setManualRateOverride(false);
         m_bpActOff->setChecked(true);
         m_bitPerfectBtn->setText("BitPerfect ▼");
     }
@@ -2873,8 +3079,8 @@ void MainWindow::showSettings()
         QString::fromUtf8("DSP OFF\xef\xbc\x88\xe3\x82\xa2\xe3\x83\x83\xe3\x83\x97\xe3\x82\xb5\xe3\x83\xb3\xe3\x83\x97\xe3\x83\xaa\xe3\x83\xb3\xe3\x82\xb0\xe3\x83\xbb\xe4\xb8\xad\xe5\xaf\x86\xe5\xba\xa6\xe3\x83\x81\xe3\x82\xa7\xe3\x83\xbc\xe3\x83\xb3\xe3\x82\x92\xe3\x81\x99\xe3\x81\xb9\xe3\x81\xa6\xe7\x84\xa1\xe5\x8a\xb9\xe3\x81\xab\xe3\x81\x99\xe3\x82\x8b\xef\xbc\x89"));
     cbDspOff->setChecked(m_player->dspOff());
     QString dspDescText =
-        "OFF" + QString::fromUtf8("\xe3\x81\xab\xe3\x81\x99\xe3\x82\x8b\xe3\x81\xa8\xe3\x82\xbd\xe3\x83\xbc\xe3\x82\xb9\xe4\xbf\xa1\xe5\x8f\xb7\xe3\x82\x92\xe3\x81\x9d\xe3\x81\xae\xe3\x81\xbe")
-        + "mDAC"
+        "OFF" + QString::fromUtf8("\xe3\x81\xab\xe3\x81\x99\xe3\x82\x8b\xe3\x81\xa8\xe3\x82\xbd\xe3\x83\xbc\xe3\x82\xb9\xe4\xbf\xa1\xe5\x8f\xb7\xe3\x82\x92\xe3\x81\x9d\xe3\x81\xae\xe3\x81\xbe\xe3\x81\xbe")
+        + "DAC"
         + QString::fromUtf8("\xe3\x81\xab\xe9\x80\x81\xe3\x82\x8b\xe6\x9c\x80\xe7\x9f\xad\xe7\xb5\x8c\xe8\xb7\xaf\xe3\x81\xab\xe3\x81\xaa\xe3\x82\x8a\xe3\x81\xbe\xe3\x81\x99\xe3\x80\x82\n")
         + QString::fromUtf8("\xe3\x83\x93\xe3\x83\x83\xe3\x83\x88\xe3\x83\x91\xe3\x83\xbc\xe3\x83\x95\xe3\x82\xa7\xe3\x82\xaf\xe3\x83\x88\xe5\x87\xba\xe5\x8a\x9b\xe3\x81\xa8\xe7\xb5\x84\xe3\x81\xbf\xe5\x90\x88\xe3\x82\x8f\xe3\x81\x9b\xe3\x82\x8b\xe3\x81\xa8\xe5\xae\x8c\xe5\x85\xa8\xe3\x81\xaa\xe3\x83\x90\xe3\x82\xa4\xe3\x83\x91\xe3\x82\xb9\xe5\x86\x8d\xe7\x94\x9f\xe3\x81\x8c\xe5\x8f\xaf\xe8\x83\xbd\xe3\x81\xa7\xe3\x81\x99\xe3\x80\x82");
     auto *dspDesc = new QLabel(dspDescText);
@@ -2926,7 +3132,7 @@ void MainWindow::showSettings()
         scheduleSave();
     });
     vl->addWidget(grpDsp);
-
+    
     // ── デフォルトに戻す
     auto *resetBtn = new QPushButton(QString::fromUtf8("\xe3\x81\x99\xe3\x81\xb9\xe3\x81\xa6\xe3\x82\x92\xe3\x83\x87\xe3\x83\x95\xe3\x82\xa9\xe3\x83\xab\xe3\x83\x88\xe3\x81\xab\xe6\x88\xbb\xe3\x81\x99"));
     resetBtn->setObjectName("toolBtn");
@@ -2971,7 +3177,7 @@ void MainWindow::showSettings()
     vl->addWidget(line);
 
     auto *aboutLabel = new QLabel(
-        QString("Always Player v7.0.0  (build %1)<br>"
+        QString("Always Player v9.0.0  (build %1)<br>"
                 "High Fidelity PC Audio Player　　"
                 "(c) 2026 YOUICHI SAIJO  GPL-3.0<br><br>"
                 "<a href='https://always-player.sakuraweb.com/' "
@@ -3024,8 +3230,12 @@ void MainWindow::turnOffBitPerfect()
     // ★ m_bpManualOff は変更しない（内部的な一時解除のみ）
     m_bpActOff->setChecked(true);
     m_bitPerfectBtn->setText("BitPerfect ▼");
+    // ★ 排他モードを内部的に一時解除したので、次にexclusive=yesへ戻すときは
+    //   同一レート判定でスキップされないようキャッシュを無効化する。
+    m_lastAppliedRate = -1;
+    m_lastAppliedBits = -1;
     // mpv property change in worker thread (WASAPI device reinit)
-    QtConcurrent::run([this]{
+    QThreadPool::globalInstance()->start([this]{
         mpv_set_property_string(m_player->mpvHandle(), "audio-exclusive", "no");
         m_player->setBitPerfectMeter(false);
     });
@@ -3087,8 +3297,8 @@ void MainWindow::onCdMetaReady(CdMetaFetcher::Result result)
 void MainWindow::showAbout()
 {
     QString buildTs = QString::fromLatin1(BUILD_TIMESTAMP);
-    QMessageBox::about(this, "Always Player v7.0.0",
-        QString("Always Player v7.0.0\n"
+    QMessageBox::about(this, "Always Player v9.0.0",
+        QString("Always Player v9.0.0\n"
                 "build %1\n\n"
                 "High Fidelity PC Audio Player\n\n"
                 "(c) 2026 YOUICHI SAIJO -- GPL-3.0\n\n"
@@ -3415,7 +3625,7 @@ void MainWindow::populateAlbumBrowser(const QString &rootPath)
 
         // アートワーク読み込みは別スレッドで（TagLib処理がGUIをブロックしない）
         QPointer<QLabel> artPtr = artLbl;  // カード削除時のダングリングポインタ防止
-        QtConcurrent::run([this, folderPath, artPtr, ART_SIZE]() {
+        QThreadPool::globalInstance()->start([this, folderPath, artPtr, ART_SIZE]() {
             QPixmap art = findAlbumArt(folderPath, ART_SIZE);
             if (!art.isNull()) {
                 QMetaObject::invokeMethod(qApp, [artPtr, art]() {

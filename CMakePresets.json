@@ -2,22 +2,18 @@
   "version": 3,
   "configurePresets": [
     {
-      "name": "windows-release",
-      "displayName": "Windows Release",
-      "generator": "NMake Makefiles",
-      "binaryDir": "${sourceDir}/build",
+      "name": "x64-release",
+      "displayName": "x64 Release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_PREFIX_PATH": "C:/Qt/6.11.0/msvc2022_64",
+        "CMAKE_PREFIX_PATH": "C:/Qt/6.11.2/msvc2022_64",
         "CMAKE_TOOLCHAIN_FILE": "C:/vcpkg/scripts/buildsystems/vcpkg.cmake",
-        "VCPKG_TARGET_TRIPLET": "x64-windows"
+        "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "CMAKE_FIND_ROOT_PATH_MODE_PACKAGE": "BOTH",
+        "Qt6_DIR": "C:/Qt/6.11.2/msvc2022_64/lib/cmake/Qt6"
       }
-    }
-  ],
-  "buildPresets": [
-    {
-      "name": "windows-release",
-      "configurePreset": "windows-release"
     }
   ]
 }

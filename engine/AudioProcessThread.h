@@ -1,0 +1,46 @@
+#pragma once
+#include "RingBuffer.h"
+#include "IAudioOutputBackend.h"
+#include <thread>
+#include <atomic>
+#include <vector>
+#include <functional>
+
+class AudioProcessThread {
+public:
+    using DspCallback = std::function<void(float* interleavedSamples, size_t frameCount)>;
+    // ★ 「もうこれ以上リングバッファへの書き込みは来ない」かどうかを問い合わせる
+    //   コールバック（PcmDualEngine::IsEndOfStream()相当）。ギャップレス遷移中は
+    //   falseのままなので、1チャンク未満の状態でも次曲のデータを待って正しく
+    //   ブロックし続ける。真の終端(このコールバックがtrueを返す)でのみ、
+    //   残っている端数フレームをゼロ埋めして最後の1回だけ出力する
+    //   （でないと端数がリングバッファに残り続け、AvailableToRead()が
+    //    永久に0にならず、呼び出し側のEOF検知が止まってしまう）。
+    using EofQuery = std::function<bool()>;
+
+    AudioProcessThread(AudioRingBuffer* sourceRing, IAudioOutputBackend* backend);
+    ~AudioProcessThread();
+
+    void SetDspCallback(DspCallback callback);
+    void SetBitPerfect(bool enabled);
+    void SetEofQuery(EofQuery query) { m_eofQuery = std::move(query); }
+
+    void Start();
+    void Stop();
+    bool IsRunning() const { return m_running.load(); }
+
+private:
+    void ThreadProc();
+
+    AudioRingBuffer* m_sourceRing;
+    IAudioOutputBackend* m_backend;
+
+    DspCallback m_dspCallback;
+    EofQuery m_eofQuery;
+    std::atomic<bool> m_bitPerfect{true};
+    std::atomic<bool> m_running{false};
+    std::thread m_thread;
+
+    size_t m_chunkFrames = 0;
+    bool m_finalPartialFlushed = false; // 真の終端の端数フレームを出力済みか（多重出力防止）
+};

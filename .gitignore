@@ -6,3 +6,10 @@
 .vs/
 *.ipch
 build/
+
+# ビルド成果物・実行用DLL（GitHubの100MB制限対策）
+out/
+*.exe
+*.dll
+*.log
+*.bak_*

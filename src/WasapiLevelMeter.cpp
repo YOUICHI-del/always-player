@@ -94,7 +94,7 @@ void WasapiLevelMeter::loopbackLoop()
 
         hr = audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
                                      AUDCLNT_STREAMFLAGS_LOOPBACK,
-                                     2000 * 10000, 0, pwfx, nullptr);
+                                     200 * 10000, 0, pwfx, nullptr);  // ★ 200ms（元は2000*10000=2秒だった。VUメーター遅延の主因）
         CoTaskMemFree(pwfx);
         if (FAILED(hr)) { qWarning() << "[WasapiLevelMeter] Initialize failed" << hr; goto cleanup; }
 

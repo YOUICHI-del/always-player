@@ -50,10 +50,9 @@ void VUMeter::tick()
         double tL = toVuT(rawL);
         double tR = toVuT(rawR);
 
-        // VU積分特性（IEC 60268-17）
-        // 300ms応答 = 5τ → τ≒60ms
-        // 30fps（33ms/tick）: α = 1 - exp(-33/60) ≒ 0.42　上昇・下降対称
-        constexpr double kAlpha = 0.42;
+        // ★ 視覚的な反応速度優先のため、VU規格(300ms/α=0.42)より速く設定
+        //    α=0.9 ≒ 応答時間 約40〜50ms相当（かなりキビキビした動き）
+        constexpr double kAlpha = 0.9;
         m_levelL += kAlpha * (tL - m_levelL);
         m_levelR += kAlpha * (tR - m_levelR);
 

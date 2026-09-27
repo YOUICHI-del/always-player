@@ -3,7 +3,7 @@
 #   C言語ソース(.c)のため、CXXのみではCコンパイラが構成されず、
 #   CMakeがコンパイルルールを生成できない（エラーも出さず黙って
 #   ビルド対象から外れ、リンク時に未解決の外部シンボルとして発覚する）。
-project(Always VERSION 9.0.0 LANGUAGES CXX C)
+project(Always VERSION 10.0.0 LANGUAGES CXX C)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -66,6 +66,8 @@ add_executable(Always WIN32
     engine/AiffPcmDecoder.cpp
     engine/WavPackPcmDecoder.h
     engine/WavPackPcmDecoder.cpp
+    engine/MfPcmDecoder.h
+    engine/MfPcmDecoder.cpp
     engine/PcmDualEngine.h
     engine/PcmDualEngine.cpp
     engine/SincResampler.h
@@ -117,6 +119,10 @@ target_link_libraries(Always PRIVATE
     winmm.lib
     mmdevapi.lib
     avrt.lib
+    mfplat.lib
+    mfreadwrite.lib
+    mfuuid.lib
+    ole32.lib
 )
 target_compile_definitions(Always PRIVATE
     UNICODE _UNICODE

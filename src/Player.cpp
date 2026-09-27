@@ -26,6 +26,7 @@
 //   （調査専用の一時的な計測用。恒久的な機能ではない）
 static qint64 dbgMs() { return static_cast<qint64>(GetTickCount64()); }
 
+
 const QStringList Player::SUPPORTED_EXT = {
     "mp3","aac","ogg","wav","flac","opus","dsf","dff","m4a","aiff","wv"
 };
@@ -33,8 +34,9 @@ const QStringList Player::SUPPORTED_EXT = {
 // ★ PcmDualEngine(WASAPI排他・ビットパーフェクト)で再生を試みるフォーマット。
 //   ここに無いフォーマットは常にmpv経路で再生される。
 //   ("aif"はAIFFの別拡張子表記。"wv"はWavPack)
+//   v10: "mp3"/"m4a"/"aac" はWindows Media Foundation(MfPcmDecoder)で追加
 const QStringList Player::NEW_ENGINE_EXT = {
-    "flac", "wav", "aiff", "aif", "wv"
+    "flac", "wav", "aiff", "aif", "wv", "mp3", "m4a", "aac"
 };
 
 Player::Player(QObject *parent) : QObject(parent) {}
@@ -638,6 +640,10 @@ if (playedViaNewEngine) {
     m_useNewEngine = true;
     m_playing = true;
     m_paused  = false;
+    // ★ v10: mpv経路ではMPV_EVENT_PLAYBACK_RESTARTでplaybackStartedが出るが、
+    //   新エンジン経路では誰も出していなかった（VUメーターが動き出さない原因の一つ）。
+    //   play()はm_mutexを保持中なので、キュー経由で発行する。
+    QMetaObject::invokeMethod(this, [this]{ emit playbackStarted(); }, Qt::QueuedConnection);
     // ★ このplay()で実際に鳴り始める曲を、デコードスレッド基準の「エンジン内
     //   カレントインデックス」としても記録する（m_currentIndexと同じ値で開始し、
     //   以後はcheckGaplessTransition()で内部スワップが起きるたびに即座に
@@ -834,25 +840,48 @@ bool Player::tryPlayViaNewEngine(const QString &filePath)
     //   （computeNewEngineTargetRate()内で判定）。
     const uint32_t nativeRate = m_pcmEngine.GetNativeSampleRate();
     const uint32_t targetRate = computeNewEngineTargetRate(nativeRate);
-    m_pcmEngine.SetTargetSampleRate(targetRate);
+
+    // ★ v10: 出力デバイスが目標レート（例：疑似DSD×8の352.8kHz）に排他モードで
+    //   対応していない場合、以前はそのままmpvへ逃げていた。今は半分ずつ
+    //   (352.8→176.4→88.2kHz…)下げて、デバイスが受け付ける一番高いレートを
+    //   自動で選ぶ。最後はネイティブ（原音）レート。
+    QList<uint32_t> candidates;
+    candidates << targetRate;
+    for (uint32_t r = targetRate / 2; r > nativeRate && r >= 44100; r /= 2)
+        candidates << r;
+    if (!candidates.contains(nativeRate)) candidates << nativeRate;
 
     AudioFormat fmt;
-    fmt.sampleRate   = m_pcmEngine.GetSampleRate(); // リサンプル後（目標）レート
-    fmt.channels     = static_cast<uint16_t>(m_pcmEngine.GetTotalChannels());
-    fmt.sampleFormat = AudioSampleFormat::Int32;
-
-    // ★ 直前にmpvへ"stop"を送っていても、実際のWASAPIデバイス解放はmpvの
-    //   内部オーディオスレッドで非同期に行われるため、ごくわずかに遅延する
-    //   ことがある。その隙間でここに来ると「デバイス使用中」で排他確保に
-    //   失敗しうるため、短い待機を挟みながら数回だけ再試行する。
     AudioBackendResult initResult = AudioBackendResult::UnknownError;
-    for (int attempt = 0; attempt < 4; ++attempt) {
-        if (attempt > 0) {
-            m_newEngineOutput.Shutdown();
-            QThread::msleep(50);
+    for (uint32_t candidate : candidates) {
+        m_pcmEngine.SetTargetSampleRate(candidate);
+
+        fmt.sampleRate   = m_pcmEngine.GetSampleRate(); // リサンプル後（目標）レート
+        fmt.channels     = static_cast<uint16_t>(m_pcmEngine.GetTotalChannels());
+        fmt.sampleFormat = AudioSampleFormat::Int32;
+
+        // ★ 直前にmpvへ"stop"を送っていても、実際のWASAPIデバイス解放はmpvの
+        //   内部オーディオスレッドで非同期に行われるため、ごくわずかに遅延する
+        //   ことがある。その隙間でここに来ると「デバイス使用中」で排他確保に
+        //   失敗しうるため、短い待機を挟みながら数回だけ再試行する。
+        //   （形式非対応は待っても変わらないので、すぐ次の候補レートへ）
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            if (attempt > 0) {
+                m_newEngineOutput.Shutdown();
+                QThread::msleep(50);
+            }
+            initResult = m_newEngineOutput.Initialize(fmt);
+            if (initResult == AudioBackendResult::Ok) break;
+            if (initResult == AudioBackendResult::FormatNotSupported) break;
         }
-        initResult = m_newEngineOutput.Initialize(fmt);
         if (initResult == AudioBackendResult::Ok) break;
+
+        m_newEngineOutput.Shutdown();
+        if (initResult == AudioBackendResult::FormatNotSupported) {
+            m_unsupportedOutRates.insert(fmt.sampleRate);
+            continue;
+        }
+        break; // 形式以外の理由（デバイス使用中など）はレートを下げても無駄
     }
     if (initResult != AudioBackendResult::Ok) {
         // ★ 排他モード確保失敗などの場合、呼び出し側でmpv経路にフォールバックする。
@@ -934,12 +963,18 @@ uint32_t Player::computeNewEngineTargetRate(uint32_t nativeRate) const
 {
     if (m_dspOff || nativeRate == 0) return nativeRate;
     const bool isHiRes = (nativeRate > 48000);
+    uint32_t target = nativeRate; // pure / loudness
     if (m_mode == "dsd8") {
-        return 352800;
+        target = 352800;
     } else if (m_mode == "hires4") {
-        return isHiRes ? nativeRate : 176400;
+        target = isHiRes ? nativeRate : 176400;
     }
-    return nativeRate; // pure / loudness
+    // ★ v10: 今の出力デバイスが受け付けなかったレートは避け、半分ずつ下げる
+    //   （ギャップレス判定で次曲の目標レートと一致させるためにも必要）。
+    while (target > nativeRate && m_unsupportedOutRates.contains(target))
+        target /= 2;
+    if (target < nativeRate) target = nativeRate;
+    return target;
 }
 
 // ★ dsd8/hires4によるレート変更やdspOff切り替えは、WASAPI排他ストリームを
@@ -1170,6 +1205,7 @@ void Player::onDefaultDeviceChangedRaw(const char *source)
         m_paused  = false;
         emit playbackStopped();
         m_stoppedByDeviceChange = true;
+        m_unsupportedOutRates.clear(); // 出力先が変わったので対応レートを調べ直す
         deviceLog(QStringLiteral("  -> playback stopped"));
     }
     // ★ mpvは一度開いたオーディオ出力(ao)を使い回すため、既定デバイスが
@@ -1192,10 +1228,11 @@ void Player::onDefaultDeviceSettled()
     m_stoppedByDeviceChange = false;
 
     QMessageBox box(QApplication::activeWindow());
-    box.setIcon(QMessageBox::Information);
+    box.setIcon(QMessageBox::Warning);   // ⚠ 黄色アイコンで音量注意を目立たせる
     box.setWindowTitle(QStringLiteral("Always Player"));
-    box.setText(QStringLiteral("出力が切り替わったため、Always Playerを停止させました。\n"
-                               "再生をしてください。"));
+    box.setText(QStringLiteral("出力先が切り替わったため、Always Playerを停止しました。"));
+    box.setInformativeText(QStringLiteral("出力先によって音量が大きく変わることがあります。\n"
+                                          "再生する前に、DACやアンプの音量を下げてから再生してください。"));
     box.setStandardButtons(QMessageBox::Ok);
     box.setWindowFlag(Qt::WindowStaysOnTopHint, true);
 
@@ -1401,11 +1438,29 @@ void Player::checkNewEngineEof()
     if (!m_pcmEngine.IsEndOfStream()) return;
     AudioRingBuffer *ring = m_pcmEngine.GetRingBuffer();
     if (ring && ring->AvailableToRead() > 0) return;
+    // ★ v10: エンジン側リングが空でも、WASAPI出力側の内部リングにはまだ
+    //   数十ms分の音が残っている。これが鳴り終わるまで待たないと、曲尾が
+    //   切れ、シークバーも最後まで伸びきらないまま次曲へ進んでしまう。
+    if (m_newEngineOutput.GetQueuedFrames() > 0) return;
 
     m_newEngineEofFired = true;
+
+    // ★ シークバー表示を曲の長さちょうどで止める（経過時間の基準を十分先へ
+    //   進めておけば、getPosition()は曲の長さでクリップされる）。
+    m_newEnginePositionBase += 1.0e6;
+
+    // ★ デバイスバッファに残った最後の1回分が鳴り終わるまでの時間＋
+    //   UIのシークバー更新周期(100ms)分だけ待ってから次曲へ進む。
+    //   （ギャップレスが効かなかった場合のみ通る経路なので、元々ここには
+    //    再オープンによる短い途切れがあり、この待ちは聴感上問題にならない）
+    int delayMs = 120;
+    const uint32_t outSr = static_cast<uint32_t>(m_newEngineOutputSr);
+    if (outSr > 0)
+        delayMs += static_cast<int>(1000ULL * m_newEngineOutput.GetBufferSize() / outSr);
+
     qDebug() << "[Gapless] FALLBACK REOPEN PATH: checkNewEngineEof fired next() "
-                "(gapless was NOT consumed for this boundary)";
-    QTimer::singleShot(0, this, [this]{
+                "(gapless was NOT consumed for this boundary) delayMs=" << delayMs;
+    QTimer::singleShot(delayMs, this, [this]{
         qDebug() << "[Player] 新エンジンEOF → next()";
         next();
     });
@@ -1695,6 +1750,16 @@ void Player::setVolume(int vol)
 
 void Player::setMode(const QString &mode, bool hp1, bool hp2, const QString &soundField)
 {
+    // ★ v10: 新エンジン再生中に「何も変わらない」setModeが来た場合は何もしない。
+    //   曲が切り替わるたびにMainWindowが同じモードを設定し直してくるが、
+    //   以前はそのたびに再オープン(reloadNewEngineForRateChange)していたため、
+    //   ギャップレスでつながったばかりの曲がそこで途切れていた。
+    //   （実際の出力レートが今のモードの目標レートと一致しているかも確認する。
+    //    setModeQuiet()でモードだけ先に書き換わっている場合は再オープンが必要）
+    if (m_useNewEngine && mode == m_mode && hp1 == m_hp1 && hp2 == m_hp2 && soundField == m_soundField
+        && m_pcmEngine.GetSampleRate() == computeNewEngineTargetRate(m_pcmEngine.GetNativeSampleRate()))
+        return;
+
     m_mode       = mode;
     m_hp1        = hp1;
     m_hp2        = hp2;
@@ -1821,7 +1886,14 @@ QString Player::getInfo(const QString &mode) const
 
     // コーデック名：再生中はmpvから、再生前は拡張子から
     QString info;
-    if (m_playing) {
+    if (m_playing && m_useNewEngine) {
+        // ★ v10: 自作エンジン再生中はmpvが止まっているのでコーデック名を
+        //   mpvから取れない。拡張子＋エンジン名を表示して、どちらの経路で
+        //   鳴っているかひと目で分かるようにする。
+        if (m_currentIndex >= 0 && m_currentIndex < m_playlist.size())
+            info = QFileInfo(m_playlist[m_currentIndex]).suffix().toUpper();
+        info += " (Always Engine)";
+    } else if (m_playing) {
         char *codec = nullptr;
         mpv_get_property(m_mpv, "audio-codec-name", MPV_FORMAT_STRING, &codec);
         if (codec) { info = QString(codec).toUpper(); mpv_free(codec); }
@@ -2076,6 +2148,14 @@ QString Player::filePathAt(int i) const
 
 void Player::getAudioLevels(float &left, float &right) const
 {
+    // ★ v10: 自作エンジン（WASAPI排他）再生中は、エンジン自身が測った
+    //   「DACへ渡した瞬間の実レベル」を使う。排他モードの音はループバックで
+    //   取れず、mpvも止まっているため、従来の方法では針が動かなかった。
+    if (m_useNewEngine) {
+        if (m_playing) m_newEngineOutput.GetLevels(left, right);
+        else left = right = 0.f;
+        return;
+    }
     if (m_levelMeter)
         m_levelMeter->getLevels(left, right);
     else

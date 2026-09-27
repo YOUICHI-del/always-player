@@ -95,6 +95,9 @@ void RemoteServer::onNewConnection()
             {"type", "hello"},
             {"app", "Always Player"},
             {"version", "9.0.0"},
+#ifdef BUILD_TIMESTAMP
+            {"build", BUILD_TIMESTAMP},   // どのビルドのexeが動いているかの確認用
+#endif
         });
         // 最新の状態と画像をこの端末へ送り直す
         if (!m_lastStatus.isEmpty()) s->write(m_lastStatus);
@@ -114,7 +117,7 @@ void RemoteServer::onReadyRead(QTcpSocket *s)
         const QJsonObject o = doc.object();
         const QString cmd = o.value("cmd").toString();
         if (cmd.isEmpty()) continue;
-        emit commandReceived(cmd, o.value("value").toDouble());
+        emit commandReceived(cmd, o);
     }
     if (s->bytesAvailable() > 64 * 1024) s->abort();
 }

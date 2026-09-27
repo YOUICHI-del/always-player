@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "WasapiExclusiveOutput.h"
 #include <functiondiscoverykeys_devpkey.h>
 #include <avrt.h>
@@ -9,25 +10,22 @@
 #include <mmsystem.h> // timeBeginPeriod/timeEndPeriod（winmm.libはCMakeLists.txtでリンク済み）
 
 namespace {
-    WAVEFORMATEXTENSIBLE BuildWaveFormat(const AudioFormat& fmt) {
+    // ★ v10: コンテナ幅(containerBits)と有効ビット数(validBits)を明示指定する。
+    //   デバイスによって受け付ける組み合わせが違うため（32/32のみ、24in32のみ、
+    //   24bit詰め(3byte)のみ、16bitのみ…）、Initialize()側で順に試す。
+    WAVEFORMATEXTENSIBLE BuildWaveFormat(uint32_t sampleRate, uint16_t channels,
+                                         uint16_t containerBits, uint16_t validBits) {
         WAVEFORMATEXTENSIBLE wfx{};
         wfx.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
-        wfx.Format.nChannels = fmt.channels;
-        wfx.Format.nSamplesPerSec = fmt.sampleRate;
-
-        uint16_t bitsPerSample = 24;
-        switch (fmt.sampleFormat) {
-            case AudioSampleFormat::Int16: bitsPerSample = 16; break;
-            case AudioSampleFormat::Int24: bitsPerSample = 24; break;
-            case AudioSampleFormat::Int32: bitsPerSample = 32; break;
-        }
-        wfx.Format.wBitsPerSample = bitsPerSample;
-        wfx.Format.nBlockAlign = (fmt.channels * bitsPerSample) / 8;
+        wfx.Format.nChannels = channels;
+        wfx.Format.nSamplesPerSec = sampleRate;
+        wfx.Format.wBitsPerSample = containerBits;
+        wfx.Format.nBlockAlign = static_cast<WORD>((channels * containerBits) / 8);
         wfx.Format.nAvgBytesPerSec = wfx.Format.nSamplesPerSec * wfx.Format.nBlockAlign;
         wfx.Format.cbSize = 22;
 
-        wfx.Samples.wValidBitsPerSample = bitsPerSample;
-        wfx.dwChannelMask = (fmt.channels == 2) ? (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT) : 0;
+        wfx.Samples.wValidBitsPerSample = validBits;
+        wfx.dwChannelMask = (channels == 2) ? (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT) : 0;
         wfx.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
         return wfx;
     }
@@ -73,30 +71,55 @@ WasapiExclusiveOutput::~WasapiExclusiveOutput() {
 }
 
 AudioBackendResult WasapiExclusiveOutput::Initialize(const AudioFormat& format) {
+    m_lastHr = S_OK;
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                                    __uuidof(IMMDeviceEnumerator), &m_enumerator);
-    if (FAILED(hr)) return AudioBackendResult::UnknownError;
+    if (FAILED(hr)) { m_lastHr = hr; return AudioBackendResult::UnknownError; }
 
     hr = m_enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &m_device);
-    if (FAILED(hr)) return AudioBackendResult::DeviceNotFound;
+    if (FAILED(hr)) { m_lastHr = hr; return AudioBackendResult::DeviceNotFound; }
 
     hr = m_device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &m_audioClient);
-    if (FAILED(hr)) return AudioBackendResult::DeviceNotFound;
+    if (FAILED(hr)) { m_lastHr = hr; return AudioBackendResult::DeviceNotFound; }
 
-    m_waveFormat = BuildWaveFormat(format);
-
-    hr = m_audioClient->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE,
-                                           reinterpret_cast<WAVEFORMATEX*>(&m_waveFormat),
-                                           nullptr);
-    if (FAILED(hr)) return AudioBackendResult::FormatNotSupported;
+    // ★ v10: 受け付けるコンテナ形式をデバイスに順に問い合わせる。
+    //   上位（AudioProcessThread）からは常に左詰めint32で渡され、
+    //   ここで決まった形式への詰め直しはWriteFrames()内で行う。
+    //   優先順：32bit(32有効) → 24bit詰め(3byte) → 24bit有効/32bitコンテナ → 16bit
+    struct Candidate { uint16_t container; uint16_t valid; };
+    const Candidate candidates[] = { {32, 32}, {24, 24}, {32, 24}, {16, 16} };
+    bool found = false;
+    for (const Candidate &c : candidates) {
+        m_waveFormat = BuildWaveFormat(format.sampleRate, format.channels, c.container, c.valid);
+        hr = m_audioClient->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE,
+                                               reinterpret_cast<WAVEFORMATEX*>(&m_waveFormat),
+                                               nullptr);
+        if (SUCCEEDED(hr) && hr != S_FALSE) {
+            m_containerBits = c.container;
+            m_validBits     = c.valid;
+            found = true;
+            break;
+        }
+    }
+    if (!found) { m_lastHr = hr; return AudioBackendResult::FormatNotSupported; }
 
     REFERENCE_TIME defaultPeriod = 0, minPeriod = 0;
     m_audioClient->GetDevicePeriod(&defaultPeriod, &minPeriod);
+    m_defaultPeriod = defaultPeriod;
+    m_minPeriod     = minPeriod;
+
+    // ★ v10修正：以前は最小周期(minPeriod)で初期化していたが、AIYIMA DAC-A7では
+    //   バッファ529フレーム(3ms)で合意したのに、実際のイベントは8msごとにしか
+    //   来なかった。毎回3ms分しか渡せず残り5msが欠け、約125Hzの「ブー」という
+    //   音になっていた（実測：起床間隔8.0ms、出力は実時間の3/8の速さ）。
+    //   ドライバが実際に動く既定周期(defaultPeriod)で初期化すれば、合意した
+    //   バッファ長とイベント間隔が一致する。
+    const REFERENCE_TIME period = (defaultPeriod > 0) ? defaultPeriod : minPeriod;
 
     hr = m_audioClient->Initialize(
         AUDCLNT_SHAREMODE_EXCLUSIVE,
         AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-        minPeriod, minPeriod,
+        period, period,
         reinterpret_cast<WAVEFORMATEX*>(&m_waveFormat),
         nullptr);
 
@@ -117,19 +140,24 @@ AudioBackendResult WasapiExclusiveOutput::Initialize(const AudioFormat& format) 
             nullptr);
     }
 
-    if (FAILED(hr)) return AudioBackendResult::ExclusiveModeUnavailable;
+    if (FAILED(hr)) { m_lastHr = hr; return AudioBackendResult::ExclusiveModeUnavailable; }
 
     // ★ 真実の源：初期化後に確定したバッファフレーム数を取得
     UINT32 confirmedBufferFrames = 0;
     hr = m_audioClient->GetBufferSize(&confirmedBufferFrames);
-    if (FAILED(hr)) return AudioBackendResult::UnknownError;
+    if (FAILED(hr)) { m_lastHr = hr; return AudioBackendResult::UnknownError; }
 
     m_bufferFrameCount = confirmedBufferFrames;
     m_bytesPerFrame = m_waveFormat.Format.nBlockAlign;
 
     m_actualFormat.sampleRate = m_waveFormat.Format.nSamplesPerSec;
     m_actualFormat.channels = m_waveFormat.Format.nChannels;
-    m_actualFormat.sampleFormat = format.sampleFormat;
+    m_actualFormat.sampleFormat = (m_validBits == 16) ? AudioSampleFormat::Int16
+                                : (m_validBits == 24) ? AudioSampleFormat::Int24
+                                                      : AudioSampleFormat::Int32;
+    // 変換用バッファ（非RTスレッドで使う。32/32以外のとき）
+    m_convBuf.assign(static_cast<size_t>(m_bufferFrameCount) * m_bytesPerFrame, 0);
+
 
     // ★ リングバッファ容量：WASAPIバッファの8個分の余裕を確保。
     size_t bufferBytes = static_cast<size_t>(m_bufferFrameCount) * m_bytesPerFrame;
@@ -139,10 +167,10 @@ AudioBackendResult WasapiExclusiveOutput::Initialize(const AudioFormat& format) 
     m_readIndex.store(0, std::memory_order_relaxed);
 
     hr = m_audioClient->SetEventHandle(m_renderEvent);
-    if (FAILED(hr)) return AudioBackendResult::UnknownError;
+    if (FAILED(hr)) { m_lastHr = hr; return AudioBackendResult::UnknownError; }
 
     hr = m_audioClient->GetService(__uuidof(IAudioRenderClient), &m_renderClient);
-    if (FAILED(hr)) return AudioBackendResult::UnknownError;
+    if (FAILED(hr)) { m_lastHr = hr; return AudioBackendResult::UnknownError; }
 
     // ===== デバッグ計測: 事前確保 =====
     // RTスレッド内でのアロケーションを避けるため、想定される最長再生時間分を
@@ -164,6 +192,62 @@ AudioFormat WasapiExclusiveOutput::GetActualFormat() const { return m_actualForm
 AudioBackendResult WasapiExclusiveOutput::WriteFrames(const uint8_t* data, uint32_t frameCount) {
     // ★ 呼び出し元(AudioProcessThread、非RTだが優先度は高い)のみがここに入る。
     //   RTスレッド(RenderThreadProc)は絶対にこの関数を呼ばない。
+    // ★ v10: 上位からは常に左詰めint32(4byte/sample)で届く。デバイスと合意した
+    //   コンテナが32/32以外なら、ここで詰め直してからリングへ書く。
+    //   ・24bit詰め：上位24bitを3byteで（24bit音源ならビットパーフェクト）
+    //   ・24in32   ：下位8bitを0にした32bit（同上）
+    //   ・16bit    ：上位16bit（16bit音源ならビットパーフェクト）
+    // ★ v10: VUメーター用に、このチャンクのRMSを上位から届いた左詰めint32で測る
+    //   （詰め直し前＝全フォーマット共通の値）。終端位置（累計バイト数）と一緒に
+    //   FIFOへ積み、RTスレッドがその位置まで渡し終えた時点で現在値にする。
+    {
+        const int32_t* in = reinterpret_cast<const int32_t*>(data);
+        const uint32_t ch = m_waveFormat.Format.nChannels;
+        double sumL = 0.0, sumR = 0.0;
+        constexpr double kS = 1.0 / 2147483648.0;
+        for (uint32_t f = 0; f < frameCount; ++f) {
+            const double l = in[f * ch] * kS;
+            const double r = (ch >= 2) ? in[f * ch + 1] * kS : l;
+            sumL += l * l;
+            sumR += r * r;
+        }
+        const size_t head = m_levelHead.load(std::memory_order_relaxed);
+        const size_t tail = m_levelTail.load(std::memory_order_acquire);
+        m_bytesWrittenTotal += static_cast<uint64_t>(frameCount) * m_bytesPerFrame;
+        if (head - tail < kLevelFifoSize && frameCount > 0) {
+            LevelEntry &e = m_levelFifo[head % kLevelFifoSize];
+            e.endByte = m_bytesWrittenTotal;
+            e.l = static_cast<float>(std::sqrt(sumL / frameCount));
+            e.r = static_cast<float>(std::sqrt(sumR / frameCount));
+            m_levelHead.store(head + 1, std::memory_order_release);
+        }
+    }
+
+    if (!(m_containerBits == 32 && m_validBits == 32)) {
+        const size_t samples = static_cast<size_t>(frameCount) * m_waveFormat.Format.nChannels;
+        const size_t needed  = static_cast<size_t>(frameCount) * m_bytesPerFrame;
+        if (m_convBuf.size() < needed) m_convBuf.resize(needed);
+        const int32_t* in = reinterpret_cast<const int32_t*>(data);
+        uint8_t* out = m_convBuf.data();
+        if (m_containerBits == 24) {
+            for (size_t i = 0; i < samples; ++i) {
+                const uint32_t v = static_cast<uint32_t>(in[i]);
+                out[i * 3 + 0] = static_cast<uint8_t>(v >> 8);
+                out[i * 3 + 1] = static_cast<uint8_t>(v >> 16);
+                out[i * 3 + 2] = static_cast<uint8_t>(v >> 24);
+            }
+        } else if (m_containerBits == 32) { // 24有効/32コンテナ
+            int32_t* o = reinterpret_cast<int32_t*>(out);
+            for (size_t i = 0; i < samples; ++i)
+                o[i] = static_cast<int32_t>(static_cast<uint32_t>(in[i]) & 0xFFFFFF00u);
+        } else { // 16bit
+            int16_t* o = reinterpret_cast<int16_t*>(out);
+            for (size_t i = 0; i < samples; ++i)
+                o[i] = static_cast<int16_t>(in[i] >> 16);
+        }
+        data = m_convBuf.data();
+    }
+
     size_t bytesToWrite = static_cast<size_t>(frameCount) * m_bytesPerFrame;
     size_t written = 0;
 
@@ -202,6 +286,21 @@ AudioBackendResult WasapiExclusiveOutput::Start() {
     //   Stop()側のtimeEndPeriod(1)と対で呼ぶこと。
     timeBeginPeriod(1);
 
+    // ★ v10修正：Start()の前に、最初の1バッファ分をデバイスへ先に積んでおく
+    //   （Microsoftのドキュメントが求める手順）。これをしないと、ドライバに
+    //   よっては「1バッファ鳴らし終える→イベント→こちらが詰める→また鳴らし
+    //   始める」の一段積みになり、毎回ドライバの処理時間(DAC-A7で約5ms)ぶん
+    //   音が途切れる（実測：10ms周期なのにイベントが15msごと）。
+    //   先に1つ積んでおけば常に1バッファ先行する二段積みになり、途切れない。
+    //   （一時停止からの再開時など、既に積まれていてGetBufferが失敗する
+    //    場合は何もしない）
+    if (m_renderClient && m_bufferFrameCount > 0) {
+        BYTE* prefill = nullptr;
+        if (SUCCEEDED(m_renderClient->GetBuffer(m_bufferFrameCount, &prefill))) {
+            m_renderClient->ReleaseBuffer(m_bufferFrameCount, AUDCLNT_BUFFERFLAGS_SILENT);
+        }
+    }
+
     m_running = true;
     m_renderThread = std::thread(&WasapiExclusiveOutput::RenderThreadProc, this);
 
@@ -228,6 +327,13 @@ AudioBackendResult WasapiExclusiveOutput::Stop() {
     // ★ 両スレッドとも止まった後なので、素のstoreで安全にリセットできる。
     m_writeIndex.store(0, std::memory_order_relaxed);
     m_readIndex.store(0, std::memory_order_relaxed);
+    // v10: VUメーター用の状態もリセット（両スレッド停止後なので安全）
+    m_levelHead.store(0, std::memory_order_relaxed);
+    m_levelTail.store(0, std::memory_order_relaxed);
+    m_bytesWrittenTotal = 0;
+    m_bytesReadTotal = 0;
+    m_levelL.store(0.f, std::memory_order_relaxed);
+    m_levelR.store(0.f, std::memory_order_relaxed);
 
     // ===== デバッグ計測: セッション終了時にCSVへ書き出す =====
     DumpDiagnostics();
@@ -282,6 +388,31 @@ void WasapiExclusiveOutput::RenderThreadProc() {
             m_underrunCount.fetch_add(1, std::memory_order_relaxed);
         }
         m_readIndex.store((readIdx + toCopy) % m_ringCapacity, std::memory_order_release);
+
+        // ★ v10: VUメーター。今デバイスへ渡し終えた位置までのレベルを現在値にする
+        //   （FIFOから値を読むだけ。RTスレッドでの負担はごくわずか）。
+        m_bytesReadTotal += toCopy;
+        {
+            size_t tail = m_levelTail.load(std::memory_order_relaxed);
+            const size_t head = m_levelHead.load(std::memory_order_acquire);
+            bool updated = false;
+            float l = 0.f, r = 0.f;
+            while (tail != head && m_levelFifo[tail % kLevelFifoSize].endByte <= m_bytesReadTotal) {
+                l = m_levelFifo[tail % kLevelFifoSize].l;
+                r = m_levelFifo[tail % kLevelFifoSize].r;
+                updated = true;
+                ++tail;
+            }
+            m_levelTail.store(tail, std::memory_order_release);
+            if (updated) {
+                m_levelL.store(l, std::memory_order_relaxed);
+                m_levelR.store(r, std::memory_order_relaxed);
+            } else if (toCopy == 0) {
+                // 音が来ていない間は針を下ろしていく
+                m_levelL.store(m_levelL.load(std::memory_order_relaxed) * 0.85f, std::memory_order_relaxed);
+                m_levelR.store(m_levelR.load(std::memory_order_relaxed) * 0.85f, std::memory_order_relaxed);
+            }
+        }
 
         m_renderClient->ReleaseBuffer(m_bufferFrameCount, 0);
 

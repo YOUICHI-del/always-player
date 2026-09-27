@@ -13,3 +13,10 @@ out/
 *.dll
 *.log
 *.bak_*
+
+# v10: 診断用に書き出されたファイル・テスト用音源（コミット不要）
+*.raw
+mf_*.bin
+mf_info.txt
+wasapi_diag_*.csv
+gapless_test/

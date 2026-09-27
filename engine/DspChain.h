@@ -74,6 +74,10 @@ private:
     double m_lpAlpha = 0.0;
     double m_lpState[2] = {0, 0};
     // [4]偶数次高調波: y = x + 0.03*x^2 （無状態なのでフィールド不要）
+    // [5]v10: DCブロッカー（[4]が生む直流成分の除去、1次ハイパスfc=2Hz）
+    double m_dcR = 0.0;
+    double m_dcX1[2] = {0, 0};
+    double m_dcY1[2] = {0, 0};
 
     // HP補正(bs2bクロスフィード近似)：cmoy/jmeierそれぞれの係数を事前計算
     double m_bs2bAlphaCmoy = 0.0, m_bs2bGainCmoy = 0.0, m_bs2bFeedCmoy = 0.0;

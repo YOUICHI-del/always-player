@@ -12,12 +12,18 @@
 //  スマホ → PC  {"cmd":"play"|"pause"|"toggle"|"stop"|"next"|"prev"}
 //               {"cmd":"volume","value":0-100}
 //               {"cmd":"seek","value":秒}
+//               {"cmd":"browse","path":フォルダ}   → folders（""で「今のフォルダの親」から、"::drives"でドライブ一覧）
+//               {"cmd":"folderArt","path":フォルダ} → folderArt（一覧のサムネイル）
+//               {"cmd":"openFolder","path":フォルダ} そのフォルダを読み込んで再生
 //  PC → スマホ  {"type":"hello","app":"Always Player","version":"9.0.0"}
 //               {"type":"status","state":"playing"|"paused"|"stopped",
 //                "title":..,"artist":..,"index":n,"total":n,
 //                "pos":秒,"dur":秒,"volume":0-100,"cd":bool,"artId":n}
 //               {"type":"art","id":n,"mime":"image/jpeg","data":"<base64>"}
 //               （artId が変わった時だけ art を送る。画像なしは id=0・data空）
+//               {"type":"folders","path":..,"parent":..,"title":..,
+//                "items":[{"name":..,"path":..,"tracks":曲数,"sub":サブフォルダ有無}]}
+//               {"type":"folderArt","path":..,"data":"<base64 JPEG>"}（画像なしは空）
 // ============================================================================
 #include <QObject>
 #include <QJsonObject>
@@ -45,11 +51,13 @@ public:
 
     // 状態を全クライアントへ送る（前回と同じ内容なら送らない）
     void publishStatus(const QJsonObject &status);
+    // 任意のメッセージを全クライアントへ送る（フォルダ一覧・サムネイルの返信用）
+    void send(const QJsonObject &obj) { broadcast(obj); }
     // ジャケット画像（JPEG）を全クライアントへ送る。id は画像ごとに一意な値
     void publishArt(qint64 id, const QByteArray &jpeg);
 
 signals:
-    void commandReceived(const QString &cmd, double value);
+    void commandReceived(const QString &cmd, const QJsonObject &obj);
     void clientConnected();       // 新しいスマホが接続した（最新の状態・画像を送り直す合図）
 
 private:

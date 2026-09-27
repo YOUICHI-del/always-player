@@ -3,6 +3,7 @@
 #include "WavPcmDecoder.h"
 #include "AiffPcmDecoder.h"
 #include "WavPackPcmDecoder.h"
+#include "MfPcmDecoder.h"
 #include <vector>
 #include <chrono>
 #include <cstdio>
@@ -39,6 +40,9 @@ bool PcmDualEngine::Open(const std::wstring& filePath, const std::string& extLow
         m_decoder = std::make_unique<AiffPcmDecoder>();
     } else if (extLower == "wv") {
         m_decoder = std::make_unique<WavPackPcmDecoder>();
+    } else if (extLower == "mp3" || extLower == "m4a" || extLower == "aac") {
+        // v10: MP3/AAC/M4A(ALAC含む)はWindows Media Foundationでデコード
+        m_decoder = std::make_unique<MfPcmDecoder>();
     } else {
         return false; // 未対応フォーマット。呼び出し側でmpv経路にフォールバック
     }
@@ -151,6 +155,8 @@ PcmDualEngine::GaplessInfo PcmDualEngine::PrepareGaplessNext(const std::wstring&
         dec = std::make_unique<AiffPcmDecoder>();
     } else if (extLower == "wv") {
         dec = std::make_unique<WavPackPcmDecoder>();
+    } else if (extLower == "mp3" || extLower == "m4a" || extLower == "aac") {
+        dec = std::make_unique<MfPcmDecoder>();
     } else {
         return info; // 未対応フォーマット。呼び出し側で通常の再オープンにフォールバック
     }

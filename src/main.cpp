@@ -8,7 +8,7 @@ int main(int argc, char *argv[])
     // 多重起動防止
     HANDLE mutex = CreateMutexA(nullptr, TRUE, "AlwaysPlayerMutex");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        // ★ ウィンドウタイトルは「Always Player  v9.0.0  -  曲名」のように変わるため、
+        // ★ ウィンドウタイトルは「Always Player  v10.0.0  -  曲名」のように変わるため、
         //   完全一致のFindWindowでは見つからない。先頭が "Always Player" の
         //   ウィンドウを探して前面に出す。
         HWND hwnd = nullptr;
@@ -32,7 +32,7 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     app.setQuitOnLastWindowClosed(false);
     app.setApplicationName("Always Player");
-    app.setApplicationVersion("9.0.0");
+    app.setApplicationVersion("10.0.0");
 
     MainWindow window;
     window.showMaximized();

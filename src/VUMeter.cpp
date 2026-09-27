@@ -42,9 +42,15 @@ void VUMeter::tick()
 
         // dBFS → VU目盛り位置（t）に変換
         // -20dBFS = t:0.0（左端）、+3dBFS = t:1.0（右端）、目盛り幅23dB
+        // ★ v10: 基準レベルの校正。以前は 0VU = 0dBFS（デジタル最大）として
+        //   いたため、音楽の平均レベル(RMS)は通常 -10〜-20dBFS 程度しかなく、
+        //   針がほとんど振れなかった（mpv経由時はループバック等の別経路で
+        //   それらしく動いていた）。業務用の基準(-18dBFS)とストリーミングの
+        //   ラウドネス基準(-14LUFS)の間をとり、0VU = -14dBFS(RMS) とする。
+        constexpr double kZeroVuDbfs = -14.0;
         auto toVuT = [](float raw) -> double {
             if (raw <= 0.f) return 0.0;
-            double db = 20.0 * std::log10((double)raw);
+            double db = 20.0 * std::log10((double)raw) - kZeroVuDbfs;
             return qBound(0.0, (db + 20.0) / 23.0, 1.0);
         };
         double tL = toVuT(rawL);
@@ -52,7 +58,10 @@ void VUMeter::tick()
 
         // ★ 視覚的な反応速度優先のため、VU規格(300ms/α=0.42)より速く設定
         //    α=0.9 ≒ 応答時間 約40〜50ms相当（かなりキビキビした動き）
-        constexpr double kAlpha = 0.9;
+        // ★ v10: VU計の規格値（300msで99%到達）に合わせる。
+        //   更新間隔33ms・1次近似で τ = 300 / ln(100) ≒ 65ms、
+        //   α = 1 - exp(-33/65) ≒ 0.40。以前の機敏な設定に戻すなら 0.9。
+        constexpr double kAlpha = 0.40;
         m_levelL += kAlpha * (tL - m_levelL);
         m_levelR += kAlpha * (tR - m_levelR);
 

@@ -106,6 +106,12 @@ void DspChain::Prepare(uint32_t sampleRate) {
     m_lpAlpha = std::exp(-2.0 * kPi * fc / fs);
     m_lpState[0] = m_lpState[1] = 0.0;
 
+    // v10: 偶数次高調波が生む直流成分を取り除くDCブロッカー(fc=2Hz)
+    m_dcR = std::exp(-2.0 * kPi * 2.0 / fs);
+    m_dcX1[0] = m_dcX1[1] = 0.0;
+    m_dcY1[0] = m_dcY1[1] = 0.0;
+
+
     // HP補正(bs2bクロスフィード近似)：cmoy(fcut=700,feed=6.0dB) / jmeier(fcut=650,feed=9.5dB)
     auto setupBs2b = [fs](double fcut, double feedDb,
                            double &alphaOut, double &gainOut, double &feedOut) {
@@ -204,6 +210,21 @@ void DspChain::Process(float* interleaved, size_t frameCount) {
 
             l = l + 0.03f * l * l;
             r = r + 0.03f * r * r;
+
+            // ★ v10: DCブロッカー（1次ハイパス、fc=2Hz）。
+            //   x²の項は偶数次高調波と同時に「音量に比例した直流成分」も生む
+            //   （実測：約-42dB＝フルスケールの約0.75%）。直流はスピーカーや
+            //   ヘッドホンの振動板を片側へ押し続けるだけの無駄な成分なので、
+            //   ここで取り除く。2Hzなら可聴帯域への影響は20Hzで-0.04dBのみで、
+            //   付加した2次高調波そのものは変わらない（シミュレーションで確認）。
+            {
+                const double yl = static_cast<double>(l) - m_dcX1[0] + m_dcR * m_dcY1[0];
+                const double yr = static_cast<double>(r) - m_dcX1[1] + m_dcR * m_dcY1[1];
+                m_dcX1[0] = l;  m_dcY1[0] = yl;
+                m_dcX1[1] = r;  m_dcY1[1] = yr;
+                l = static_cast<float>(yl);
+                r = static_cast<float>(yr);
+            }
         }
 
         // ── HP補正（cmoy / jmeier、どちらか一方のみ有効）

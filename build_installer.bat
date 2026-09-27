@@ -1,7 +1,7 @@
 @echo off
 setlocal
 REM ============================================
-REM Always Player v9.0.0 - Installer build script
+REM Always Player v10.0.0 - Installer build script
 REM Just double-click this file.
 REM ============================================
 set WIX_BIN="C:\Program Files (x86)\WiX Toolset v3.14\bin"
@@ -31,7 +31,7 @@ if errorlevel 1 (
     exit /b 1
 )
 echo [2/2] Building msi...
-%WIX_BIN%\light.exe -ext WixUIExtension -out "%SRC%\AlwaysPlayer_v9.0.0.msi" "%SRC%\Always.wixobj"
+%WIX_BIN%\light.exe -ext WixUIExtension -out "%SRC%\AlwaysPlayer_v10.0.0.msi" "%SRC%\Always.wixobj"
 if errorlevel 1 (
     echo.
     echo ERROR during light step. See messages above.
@@ -40,6 +40,6 @@ if errorlevel 1 (
 )
 echo.
 echo ============================================
-echo  DONE. AlwaysPlayer_v9.0.0.msi has been created.
+echo  DONE. AlwaysPlayer_v10.0.0.msi has been created.
 echo ============================================
 pause

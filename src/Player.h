@@ -7,6 +7,7 @@
 #include <QMutex>
 #include <QElapsedTimer>
 #include <QVector>
+#include <QSet>
 #include <mpv/client.h>
 #include <taglib/fileref.h>
 #include <taglib/tag.h>
@@ -302,6 +303,8 @@ private:
     // ★ 新エンジンが実際にWASAPIへ出力しているレート（BitPerfect表示専用）。
     //   dsd8/hires4でアップサンプリングしていればm_cachedSrと異なる値になる。
     int m_newEngineOutputSr = 0;
+    // v10: 今の出力デバイスが排他モードで受け付けなかった出力レート
+    QSet<uint32_t> m_unsupportedOutRates;
 
     // タグ読み取りスレッドの世代管理（古いスレッド結果を破棄するためのシリアル番号）
     int m_playSerial = 0;

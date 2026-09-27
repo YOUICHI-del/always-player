@@ -66,10 +66,18 @@ void AudioProcessThread::ThreadProc() {
 
             m_dspCallback(floatChunk.data(), m_chunkFrames);
 
+            // ★ v10修正（重大）：以前はfloatのまま「v > 2147483647.0f」でクリップして
+            //   int32へ変換していたが、floatでは2147483647を表せず2147483648.0に
+            //   丸められる。そのため0dBを少しでも超えたサンプル（DSPのEQや高調波で
+            //   音量の大きい曲のピークが超える）が「+最大」ではなく「-最大」に
+            //   化けていた（x86の変換は範囲外で0x80000000を返す）。これが音量の
+            //   大きい曲での「バリバリ」の正体。テスト用の小さな正弦波では0dBに
+            //   届かないため再現しなかった。doubleで計算・クリップしてから変換する。
+            constexpr double kFullScaleD = 2147483647.0;
             for (size_t i = 0; i < samplesPerChunk; ++i) {
-                float v = floatChunk[i] * kInt32FullScale;
-                if (v > kInt32FullScale) v = kInt32FullScale;
-                if (v < -kInt32FullScale) v = -kInt32FullScale;
+                double v = static_cast<double>(floatChunk[i]) * kFullScaleD;
+                if (v >  kFullScaleD) v =  kFullScaleD;
+                if (v < -kFullScaleD) v = -kFullScaleD;
                 s32Chunk[i] = static_cast<int32_t>(v);
             }
             m_backend->WriteFrames(reinterpret_cast<const uint8_t*>(s32Chunk.data()),

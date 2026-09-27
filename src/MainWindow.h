@@ -13,6 +13,7 @@
 #include <QScrollArea>
 #include <QGridLayout>
 #include <QInputDialog>
+#include <QJsonObject>
 #include <memory>
 #include "Player.h"
 #include "VUMeter.h"
@@ -85,7 +86,9 @@ private:
 
     // ★ v9: Always Player for Android からのリモコン(Always Link)
     void setupRemote();
-    void onRemoteCommand(const QString &cmd, double value);
+    void onRemoteCommand(const QString &cmd, const QJsonObject &obj);
+    void remoteBrowse(const QString &path);
+    void remoteFolderArt(const QString &path);
     void publishRemoteStatus();
 
     Player         *m_player   = nullptr;
@@ -122,6 +125,9 @@ private:
     //   （このフラグが無かったため、手動選択が次の曲で352.8kHz(dsd8)に
     //     勝手に戻ってしまうバグがあった。）
     bool         m_bpManualRatePinned = false;
+    // v10: ユーザーが最後に自分で選んだ音質モード。曲が変わっても維持する
+    //      （ハイレゾ曲の間だけは強制的にピュア、終われば元に戻す）
+    QString      m_userMode = "dsd8";
     int          m_pinnedBpRate   = 0;
     int          m_pinnedBpBits   = 0;
     // ★ 曲間ノイズ対策：直前にWASAPI排他へ実際に適用した出力レート/ビット数を記録。

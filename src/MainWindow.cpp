@@ -5,6 +5,7 @@
 #include "CdMetaFetcher.h"
 #include "RemoteServer.h"
 #include <QBuffer>
+#include <QCollator>
 #include <mpv/client.h>
 #include <QRadioButton>
 #include <QCheckBox>
@@ -318,7 +319,7 @@ static QString searchWikipediaUrl(const QString &artist)
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 {
-    setWindowTitle("Always Player  v9.0.0");
+    setWindowTitle("Always Player  v10.0.0");
     setWindowIcon(QIcon(":/icons/Always.ico"));
     setMinimumSize(900, 700);
 
@@ -441,8 +442,97 @@ void MainWindow::setupRemote()
     m_remoteTimer->start(500);
 }
 
-void MainWindow::onRemoteCommand(const QString &cmd, double value)
+void MainWindow::onRemoteCommand(const QString &cmd, const QJsonObject &obj)
 {
+    const double value = obj.value("value").toDouble();
+    const QString path = obj.value("path").toString();
+
+    // ── フォルダ操作（スマホから別のアルバムを開く）
+    if (cmd == "browse")     { remoteBrowse(path); return; }
+
+    // ── 曲一覧（今のフォルダ／CDの曲）と、その曲への直接ジャンプ
+    if (cmd == "tracks") {
+        QJsonArray items;
+        if (m_isCdMode) {
+            for (int i = 0; i < m_playlist->count(); ++i) items.append(m_playlist->item(i)->text());
+        } else {
+            for (int i = 0; i < m_player->total(); ++i) items.append(m_player->fileAt(i));
+        }
+        m_remote->send(QJsonObject{{"type", "tracks"}, {"items", items}});
+        return;
+    }
+    if (cmd == "playIndex") {
+        const int idx = int(value);
+        if (m_isCdMode) { if (idx >= 0 && idx < m_cdTrackCount) startCdTrackStream(idx); }
+        else if (idx >= 0 && idx < m_player->total()) m_player->play(idx);
+        publishRemoteStatus();
+        return;
+    }
+
+    // ── 再生モード（PC版のShuffle / Repeatメニューと同じ設定をする）
+    if (cmd == "repeat") {
+        const QString v = obj.value("mode").toString();
+        if (v == "one") {
+            m_player->setRepeat(Player::RepeatMode::One);
+            m_repeatBtn->setChecked(true);
+            m_repeatBtn->setText(QString::fromUtf8("\xe2\x86\xa9 1\xe6\x9b\xb2"));
+        } else if (v == "all") {
+            m_player->setRepeat(Player::RepeatMode::All);
+            m_repeatBtn->setChecked(true);
+            m_repeatBtn->setText(QString::fromUtf8("\xe2\x86\xa9 \xe5\x85\xa8\xe6\x9b\xb2"));
+        } else {
+            m_player->setRepeat(Player::RepeatMode::None);
+            m_repeatBtn->setChecked(false);
+            m_repeatBtn->setText(QString::fromUtf8("\xe2\x86\xa9 Repeat"));
+        }
+        publishRemoteStatus();
+        return;
+    }
+    if (cmd == "shuffle") {
+        if (obj.value("mode").toString() == "folder") {
+            m_player->setShuffle(Player::ShuffleMode::Folder);
+            m_shuffleBtn->setChecked(true);
+            m_shuffleBtn->setText(QString::fromUtf8("\xe2\x87\x8c \xe3\x83\x95\xe3\x82\xa9\xe3\x83\xab\xe3\x83\x80\xe5\x86\x85"));
+        } else {
+            m_player->setShuffle(Player::ShuffleMode::None);
+            m_shuffleBtn->setChecked(false);
+            m_shuffleBtn->setText(QString::fromUtf8("\xe2\x87\x8c Shuffle"));
+        }
+        publishRemoteStatus();
+        return;
+    }
+
+    // ── ヘッドホン補正（HP1 / HP2）。画面のボタンを押すのと同じ（押すたびにON/OFF、片方ONでもう片方OFF）
+    if (cmd == "hp") {
+        QPushButton *b = obj.value("mode").toString() == "hp2" ? m_hp2Btn : m_hp1Btn;
+        if (b && b->isEnabled()) b->click();
+        publishRemoteStatus();
+        return;
+    }
+
+    // ── 音質モード（ピュア / ハイレゾx4 / 疑似DSDx8 / ラウドネス）。画面のボタンを押すのと同じ
+    if (cmd == "mode") {
+        const QString key = obj.value("mode").toString();
+        if (m_modeBtns.contains(key) && m_modeBtns[key]->isEnabled()) m_modeBtns[key]->click();
+        publishRemoteStatus();
+        return;
+    }
+    if (cmd == "folderArt")  { remoteFolderArt(path); return; }
+    if (cmd == "openFolder") {
+        if (path.isEmpty() || !QDir(path).exists()) return;
+        // アルバムブラウザでカードをクリックした時と同じ手順で開いて、1曲目から再生
+        stopIfCd();
+        clearCdState();
+        m_player->stop();
+        turnOffBitPerfect();
+        loadFolder(path, false);
+        if (m_player->total() > 0) m_player->play(0);
+        if (QStackedWidget *ps = qobject_cast<QStackedWidget*>(m_mainContent->parentWidget()))
+            ps->setCurrentIndex(0);
+        publishRemoteStatus();
+        return;
+    }
+
     if      (cmd == "play")   m_playBtn->click();
     else if (cmd == "pause")  { if (m_isCdMode ? !m_cdPaused : !m_player->isPaused()) m_pauseBtn->click(); }
     else if (cmd == "toggle") {
@@ -460,6 +550,87 @@ void MainWindow::onRemoteCommand(const QString &cmd, double value)
         if (!m_isCdMode && m_player->isPlaying() && value >= 0) m_player->seekTo(value);
     }
     publishRemoteStatus();
+}
+
+// 曲として数える拡張子（Player::SUPPORTED_EXT と同じ）
+static const QStringList kRemoteAudioFilters = {
+    "*.mp3","*.aac","*.ogg","*.wav","*.flac","*.opus","*.dsf","*.dff","*.m4a","*.aiff","*.aif","*.wv"
+};
+
+// スマホへフォルダ一覧を送る。path="" は「今のフォルダの親」、"::drives" はドライブ一覧
+void MainWindow::remoteBrowse(const QString &pathIn)
+{
+    QString path = pathIn;
+    if (path.isEmpty()) {
+        QDir cur(m_currentFolder);
+        path = (!m_currentFolder.isEmpty() && cur.exists() && cur.cdUp()) ? cur.absolutePath() : "::drives";
+    }
+
+    QJsonArray items;
+    QString parent, title;
+
+    auto folderEntry = [](const QFileInfo &fi, const QString &name) {
+        QDir d(fi.absoluteFilePath());
+        const int tracks = d.entryList(kRemoteAudioFilters, QDir::Files).size();
+        const bool sub = !d.entryList(QDir::Dirs | QDir::NoDotAndDotDot).isEmpty();
+        return QJsonObject{
+            {"name", name}, {"path", fi.absoluteFilePath()}, {"tracks", tracks}, {"sub", sub},
+        };
+    };
+
+    if (path == "::drives") {
+        title = QString::fromUtf8("PC");
+        for (const QFileInfo &fi : QDir::drives()) {
+            const QString root = fi.absoluteFilePath();          // 例: "C:/"
+            // CDドライブは中身の読み取りに時間がかかるため一覧に出さない
+            if (GetDriveTypeW(reinterpret_cast<LPCWSTR>(QDir::toNativeSeparators(root).utf16())) == DRIVE_CDROM)
+                continue;
+            items.append(QJsonObject{
+                {"name", QDir::toNativeSeparators(root).chopped(1)}, {"path", root}, {"tracks", 0}, {"sub", true},
+            });
+        }
+    } else {
+        QDir d(path);
+        if (!d.exists()) { remoteBrowse("::drives"); return; }
+        title = d.isRoot() ? QDir::toNativeSeparators(d.absolutePath()) : d.dirName();
+        QDir up(d);
+        parent = up.cdUp() ? up.absolutePath() : QString("::drives");
+        if (d.isRoot()) parent = "::drives";
+
+        // 自然順（1,2,10）で並べる。隠し・システムフォルダは出さない
+        QCollator col;
+        col.setNumericMode(true);
+        col.setCaseSensitivity(Qt::CaseInsensitive);
+        QFileInfoList dirs = d.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+        std::sort(dirs.begin(), dirs.end(), [&](const QFileInfo &a, const QFileInfo &b) {
+            return col.compare(a.fileName(), b.fileName()) < 0;
+        });
+        for (const QFileInfo &fi : dirs) {
+            if (fi.isHidden() || fi.fileName().startsWith('$')) continue;
+            items.append(folderEntry(fi, fi.fileName()));
+        }
+    }
+
+    m_remote->send(QJsonObject{
+        {"type", "folders"}, {"path", path}, {"parent", parent}, {"title", title}, {"items", items},
+    });
+}
+
+// フォルダのジャケット（アルバムブラウザと同じ findAlbumArt）を小さく送る
+void MainWindow::remoteFolderArt(const QString &path)
+{
+    QByteArray jpeg;
+    if (!path.isEmpty() && !path.startsWith("::") && QDir(path).exists()) {
+        const QPixmap px = findAlbumArt(path, 200);
+        if (!px.isNull()) {
+            QBuffer buf(&jpeg);
+            buf.open(QIODevice::WriteOnly);
+            px.save(&buf, "JPG", 80);
+        }
+    }
+    m_remote->send(QJsonObject{
+        {"type", "folderArt"}, {"path", path}, {"data", QString::fromLatin1(jpeg.toBase64())},
+    });
 }
 
 void MainWindow::publishRemoteStatus()
@@ -482,6 +653,13 @@ void MainWindow::publishRemoteStatus()
             mpv_get_property(m_player->mpvHandle(), "time-pos", MPV_FORMAT_DOUBLE, &pos);
             mpv_get_property(m_player->mpvHandle(), "duration", MPV_FORMAT_DOUBLE, &dur);
         }
+    }
+
+    // 音質モードの一覧（ボタンの表示名はCD/ハイレゾで変わるので毎回画面から取る）
+    QJsonArray modes;
+    for (const QString &k : {QStringLiteral("pure"), QStringLiteral("hires4"), QStringLiteral("dsd8"), QStringLiteral("loudness")}) {
+        if (!m_modeBtns.contains(k)) continue;
+        modes.append(QJsonObject{{"key", k}, {"label", m_modeBtns[k]->text()}, {"enabled", m_modeBtns[k]->isEnabled()}});
     }
 
     // ジャケット：画面に出ている画像をそのまま送る（CDのネット取得画像も含む）
@@ -510,10 +688,19 @@ void MainWindow::publishRemoteStatus()
         {"volume", m_volSlider ? m_volSlider->value() : 100},
         {"cd",     m_isCdMode},
         {"artId",  double(art.isNull() ? 0 : m_remoteArtId)},
-        // 診断用（Player内部のフラグ。一時停止の判定確認のため）
-        {"dbg", QString("playing=%1 paused=%2 newEngine=%3")
-                    .arg(int(m_player->isPlaying())).arg(int(m_player->isPaused()))
-                    .arg(int(m_player->isUsingNewEngineNow()))},
+        {"repeat", m_player->repeatMode() == Player::RepeatMode::One ? "one"
+                 : m_player->repeatMode() == Player::RepeatMode::All ? "all" : "none"},
+        {"shuffle", m_player->shuffleMode() == Player::ShuffleMode::Folder ? "folder"
+                  : m_player->shuffleMode() == Player::ShuffleMode::Favorites ? "favorites" : "none"},
+        {"mode",   currentMode()},
+        {"modes",  modes},
+        {"hp", QJsonArray{
+            QJsonObject{{"key", "hp1"}, {"label", m_hp1Btn ? m_hp1Btn->text() : QString()},
+                        {"on", m_hp1On}, {"enabled", m_hp1Btn && m_hp1Btn->isEnabled()}},
+            QJsonObject{{"key", "hp2"}, {"label", m_hp2Btn ? m_hp2Btn->text() : QString()},
+                        {"on", m_hp2On}, {"enabled", m_hp2Btn && m_hp2Btn->isEnabled()}},
+        }},
+        {"modeDesc", m_modeDesc ? m_modeDesc->text() : QString()},
     });
 }
 
@@ -909,6 +1096,7 @@ void MainWindow::setupUI()
             //   モード連動の自動レート決定に戻す。
             m_bpManualRatePinned = false;
             m_player->setManualRateOverride(false);
+            m_userMode = key; // v10: 選んだモードを覚えておき、次の曲でも使う
             // ハイレゾ音源はピュアモードのみ
             bool hiRes = (m_player->cachedSr() > 48000);
             QString actualKey = (key != "pure" && hiRes) ? "pure" : key;
@@ -1505,7 +1693,7 @@ void MainWindow::playCd(const QString &drive)
     m_stack->setCurrentIndex(0);
 
     if (m_artistInfoBtn) m_artistInfoBtn->setEnabled(false);
-    setWindowTitle(jp("Always Player  v9.0.0  -  CD"));
+    setWindowTitle(jp("Always Player  v10.0.0  -  CD"));
     // ★ バックグラウンドでメタデータ取得開始（再生前はpauseBtn無効）
     // pauseBtn は常に有効（setEnabledによる色変化を避ける）
     m_statusBar->setText(jp("\xe6\xa4\x9c\xe7\xb4\xa2\xe4\xb8\xad... MusicBrainz / iTunes"));
@@ -1731,7 +1919,7 @@ void MainWindow::startCdTrackStream(int trackIndex)
                     m_seekSlider->setValue(0);
                     m_timeLabel->setText("0:00 / 0:00");
                     m_statusBar->setText(">> CD 再生完了");
-                    setWindowTitle(jp("Always Player  v9.0.0  -  CD"));
+                    setWindowTitle(jp("Always Player  v10.0.0  -  CD"));
                 }
             }
         });
@@ -1750,7 +1938,7 @@ void MainWindow::startCdTrackStream(int trackIndex)
     m_subTitle->setText(QString("%1  /  %2").arg(trackIndex + 1).arg(m_cdTrackCount));
     m_playlist->setCurrentRow(trackIndex);
     m_statusBar->setText(">> " + name);
-    setWindowTitle(jp("Always Player  v9.0.0  -  CD  -  ") + name);
+    setWindowTitle(jp("Always Player  v10.0.0  -  CD  -  ") + name);
 
 
 }
@@ -1836,7 +2024,7 @@ void MainWindow::loadFolder(const QString &path, bool autoPlay)
         m_player->setCachedInfo(br, sr, bits);
         // ハイレゾ判定→モードボタン更新
         bool hiRes = (sr > 48000);
-        QString autoMode = hiRes ? "pure" : "dsd8";
+        QString autoMode = hiRes ? "pure" : m_userMode; // v10: 以前は常にdsd8へ戻していた
         {
             QMap<QString,QString> hiResLabels;
             hiResLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
@@ -1871,7 +2059,7 @@ void MainWindow::loadFolder(const QString &path, bool autoPlay)
         m_currentArtist = artist;
         if (m_artistInfoBtn) m_artistInfoBtn->setEnabled(!artist.isEmpty());
         m_playlist->setCurrentRow(0);
-        setWindowTitle(QString::fromUtf8("Always Player  v9.0.0  -  ") + QFileInfo(fp).fileName());
+        setWindowTitle(QString::fromUtf8("Always Player  v10.0.0  -  ") + QFileInfo(fp).fileName());
         m_statusBar->setText(">> " + QFileInfo(fp).completeBaseName());
     }
 
@@ -1932,7 +2120,7 @@ void MainWindow::onTrackChanged(int index, const QString &filename,
     m_currentArtist = artist;
     if (m_artistInfoBtn) m_artistInfoBtn->setEnabled(!artist.isEmpty());
     m_playlist->setCurrentRow(index);
-    setWindowTitle(QString::fromUtf8("Always Player  v9.0.0  -  ") + filename);
+    setWindowTitle(QString::fromUtf8("Always Player  v10.0.0  -  ") + filename);
     m_statusBar->setText(">> " + filename.section('.', 0, -2));
 
     // ハイレゾ自動モード切り替え＋disabled制御＋infoLabel更新
@@ -2084,7 +2272,7 @@ void MainWindow::onTrackChanged(int index, const QString &filename,
             if (!m_bpManualRatePinned) {
                 // ハイレゾ判定
                 bool hiRes = (sr > 48000);
-                QString autoMode = hiRes ? "pure" : "dsd8";
+                QString autoMode = hiRes ? "pure" : m_userMode; // v10: 以前は常にdsd8へ戻していた
 
                 // ボタン状態更新
                 {
@@ -3183,7 +3371,7 @@ void MainWindow::showSettings()
     vl->addWidget(line);
 
     auto *aboutLabel = new QLabel(
-        QString("Always Player v9.0.0  (build %1)<br>"
+        QString("Always Player v10.0.0  (build %1)<br>"
                 "High Fidelity PC Audio Player　　"
                 "(c) 2026 YOUICHI SAIJO  GPL-3.0<br><br>"
                 "<a href='https://always-player.sakuraweb.com/' "
@@ -3303,8 +3491,8 @@ void MainWindow::onCdMetaReady(CdMetaFetcher::Result result)
 void MainWindow::showAbout()
 {
     QString buildTs = QString::fromLatin1(BUILD_TIMESTAMP);
-    QMessageBox::about(this, "Always Player v9.0.0",
-        QString("Always Player v9.0.0\n"
+    QMessageBox::about(this, "Always Player v10.0.0",
+        QString("Always Player v10.0.0\n"
                 "build %1\n\n"
                 "High Fidelity PC Audio Player\n\n"
                 "(c) 2026 YOUICHI SAIJO -- GPL-3.0\n\n"

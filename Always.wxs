@@ -60,9 +60,6 @@
       <Component Id="cmp_Always_exe" Guid="{4C6DE3CA-8A5C-48CE-9647-349BC828DFD3}" Win64="yes">
         <File Id="fil_Always_exe" KeyPath="yes" Source="$(var.SourceDir)\Always.exe" />
       </Component>
-      <Component Id="cmp_libmpv" Guid="{D143CAF6-247B-4855-BA54-6679529BB86E}" Win64="yes">
-        <File Id="fil_libmpv" KeyPath="yes" Source="$(var.SourceDir)\libmpv-2.dll" />
-      </Component>
       <Component Id="cmp_tag_dll" Guid="{9678ED11-20CE-4BBD-8CDB-8008EEBF1617}" Win64="yes">
         <File Id="fil_tag_dll" KeyPath="yes" Source="$(var.SourceDir)\tag.dll" />
       </Component>

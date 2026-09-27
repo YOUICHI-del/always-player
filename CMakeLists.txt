@@ -12,8 +12,6 @@ set(CMAKE_AUTOUIC ON)
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network)
 set(taglib_DIR "C:/vcpkg/installed/x64-windows/share/taglib" CACHE PATH "" FORCE)
 find_package(taglib CONFIG REQUIRED)
-set(MPV_INCLUDE_DIR "C:/libs/mpv/include")
-set(MPV_LIB_DIR "C:/libs/mpv")
 # Build timestamp
 string(TIMESTAMP BUILD_TIMESTAMP "%Y%m%d-%H%M")
 add_executable(Always WIN32
@@ -26,8 +24,6 @@ add_executable(Always WIN32
     src/TrayManager.h
     src/VUMeter.cpp
     src/VUMeter.h
-    src/WasapiLevelMeter.cpp
-    src/WasapiLevelMeter.h
     resources/resources.qrc
     resources/app.rc
     src/TimerMonitor.h
@@ -107,7 +103,6 @@ add_executable(Always WIN32
     engine/wavpack/wavpack_version.h
 )
 target_include_directories(Always PRIVATE
-    ${MPV_INCLUDE_DIR}
     src
     engine
     engine/wavpack
@@ -122,7 +117,6 @@ target_link_libraries(Always PRIVATE
     Qt6::Concurrent
     Qt6::Network
     TagLib::tag
-    ${MPV_LIB_DIR}/libmpv.dll.a
     winhttp.lib
     powrprof.lib
     winmm.lib

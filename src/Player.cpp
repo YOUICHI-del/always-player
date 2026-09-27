@@ -1,5 +1,4 @@
 #include "Player.h"
-#include "WasapiLevelMeter.h"
 #include <shlwapi.h>  // StrCmpLogicalW（自然順ソート）
 #include <intrin.h>   // __cpuid（CPUスペック判定）
 #pragma comment(lib, "shlwapi.lib")
@@ -59,30 +58,12 @@ Player::~Player()
     // ★ COMスレッドからの通知が破棄後のPlayerへ届かないよう、最初に登録解除する。
     m_deviceWatcher.Stop();
     stop();
-    if (m_levelMeter) m_levelMeter->stop();
-    if (m_mpv) mpv_terminate_destroy(m_mpv);
     // ④ init()でtimeBeginPeriod(1)したものを返却
     timeEndPeriod(1);
 }
 
 bool Player::init()
 {
-    m_mpv = mpv_create();
-    if (!m_mpv) { emit errorOccurred("mpv初期化失敗"); return false; }
-
-    // ★ configファイルを無効化（前回の状態が復元されるのを防ぐ）
-    mpv_set_option_string(m_mpv, "config", "no");
-    mpv_set_option_string(m_mpv, "no-resume-playback", "yes");
-
-    mpv_set_option_string(m_mpv, "video",               "no");
-    mpv_set_option_string(m_mpv, "really-quiet",        "yes");
-    mpv_set_option_string(m_mpv, "cache",              "yes");
-    mpv_set_option_string(m_mpv, "demuxer-max-bytes",  "512MiB");
-    mpv_set_option_string(m_mpv, "demuxer-readahead-secs", "300");
-    mpv_set_option_string(m_mpv, "audio-buffer",        "0.1");
-    mpv_set_option_string(m_mpv, "audio-device-buffer", "0.02");
-    mpv_set_option_string(m_mpv, "demuxer",             "lavf");
-
     timeBeginPeriod(1);
     SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
 
@@ -138,92 +119,9 @@ bool Player::init()
     connect(m_devicePollTimer, &QTimer::timeout, this, [this]{ onDefaultDeviceChangedRaw("poll"); });
     m_devicePollTimer->start();
 
-    if (mpv_initialize(m_mpv) < 0) {
-        emit errorOccurred("mpv初期化失敗");
-        return false;
-    }
-
-    mpv_observe_property(m_mpv, 0, "playlist-pos",        MPV_FORMAT_INT64);
-    mpv_observe_property(m_mpv, 0, "time-pos",            MPV_FORMAT_DOUBLE);
-    mpv_observe_property(m_mpv, 0, "duration",            MPV_FORMAT_DOUBLE);
-    mpv_observe_property(m_mpv, 0, "eof-reached",         MPV_FORMAT_FLAG);
-    mpv_observe_property(m_mpv, 0, "demuxer-cache-state", MPV_FORMAT_NODE);
-
-    // WASAPI ループバックレベルメーターを起動
-    m_levelMeter = new WasapiLevelMeter();
-    m_levelMeter->setMpvHandle(m_mpv);
-    m_levelMeter->start();
-
-    QThread *th = new QThread(this);
-    connect(th, &QThread::started, [this]{
-        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-        mpvEventLoop();
-    });
-    th->start();
-
     return true;
 }
 
-void Player::mpvEventLoop()
-{
-    while (true) {
-        mpv_event *ev = mpv_wait_event(m_mpv, 0.5);
-        if (!ev) continue;
-        if (ev->event_id == MPV_EVENT_SHUTDOWN) break;
-
-        if (ev->event_id == MPV_EVENT_END_FILE) {
-            auto *ef = (mpv_event_end_file*)ev->data;
-            if (ef->reason == MPV_END_FILE_REASON_EOF) {
-                QTimer::singleShot(0, this, [this]{
-                    qDebug() << "[Player] EOF → next()";
-                    next();
-                });
-            }
-        }
-
-        if (ev->event_id == MPV_EVENT_PLAYBACK_RESTART) {
-            emit playbackStarted();
-        }
-
-        if (ev->event_id == MPV_EVENT_PROPERTY_CHANGE) {
-            auto *prop = (mpv_event_property*)ev->data;
-
-
-            // demuxer-cache-state から packet-bitrate を取得（FLAC等のリアルタイムkbps）
-            if (prop && strcmp(prop->name, "demuxer-cache-state") == 0 &&
-                prop->format == MPV_FORMAT_NODE) {
-                mpv_node *node = (mpv_node*)prop->data;
-                if (node && node->format == MPV_FORMAT_NODE_MAP) {
-                    mpv_node_list *lst = node->u.list;
-                    for (int i = 0; i < lst->num; i++) {
-                        if (strcmp(lst->keys[i], "packet-bitrate") == 0 &&
-                            lst->values[i].format == MPV_FORMAT_DOUBLE) {
-                            double pb = lst->values[i].u.double_;
-                            if (pb > 0) m_realtimeBr = static_cast<int>(pb / 1000.0);
-                        }
-                    }
-                }
-            }
-
-            // ★ playlist-pos変化 → CD再生中のみtrackChangedを発火
-            if (prop && strcmp(prop->name, "playlist-pos") == 0 &&
-                prop->format == MPV_FORMAT_INT64 &&
-                !m_playlist.isEmpty() && m_playlist[0].startsWith("cdda://")) {
-                int64_t pos = *(int64_t*)prop->data;
-                if (pos >= 0 && pos != m_currentIndex) {
-                    m_currentIndex = static_cast<int>(pos);
-                    int capturedIndex = m_currentIndex;
-                    QMetaObject::invokeMethod(this, [this, capturedIndex]{
-                        emit trackChanged(capturedIndex, QString(), QString(), QString());
-                    }, Qt::QueuedConnection);
-                }
-            }
-        }
-    }
-}
-
-// ── 音質チェーン適用
-// audio-samplerateはmpv_initialize後はset_propertyで設定
 QString Player::loadLastFolder()
 {
     QString ini = QDir::homePath() + "/AlwaysPlayer.ini";
@@ -237,210 +135,6 @@ QString Player::loadLastFolder()
         }
     }
     return {};
-}
-
-void Player::applyAudioChain()
-{
-    // ── DSP完全バイパス：af空・アップサンプリングなし
-    // ソース信号をそのままWASAPIに渡す最短経路
-    if (m_dspOff) {
-        mpv_set_property_string(m_mpv, "audio-samplerate", "0");
-        mpv_set_property_string(m_mpv, "audio-format",     "s24");
-        mpv_set_property_string(m_mpv, "af",               "");
-        return;
-    }
-
-    // ── af 連結ヘルパー（先頭カンマバグ防止）
-    // af が空の場合はそのままセット、非空の場合はカンマで連結する
-    auto appendAf = [](QString &af, const QString &filter) {
-        if (af.isEmpty()) af = filter;
-        else              af += "," + filter;
-    };
-
-    QString af;
-
-    // ★ play() 時にキャッシュ済みの m_cachedSr を使う（TagLib不要・mutex不要）
-    // play() の QtConcurrent タグ読み取りより前に呼ばれるが、
-    // loadFolder / onTrackChanged で setCachedInfo が事前に設定されているため十分
-    bool isHiRes = (m_cachedSr > 48000);
-
-    // ── CPUスペックに応じたprecision自動判定
-    // AVX-512 → precision=32 / AVX2 → precision=28 / SSE2 → precision=24
-    static const int s_precision = []() -> int {
-        int info[4] = {};
-#if defined(_MSC_VER)
-        __cpuid(info, 0);
-        int nIds = info[0];
-        if (nIds >= 7) {
-            __cpuidex(info, 7, 0);
-            if (info[1] & (1 << 16)) return 32;  // AVX-512F
-            if (info[1] & (1 <<  5)) return 28;  // AVX2
-        }
-        __cpuid(info, 1);
-        if (info[3] & (1 << 26)) return 24;  // SSE2
-#endif
-        return 24;  // フォールバック
-    }();
-    const QString RESAMP = QString("aresample=resampler=swr:precision=%1:cutoff=0.9998")
-                           .arg(s_precision);
-
-    // ★ MainWindowの「16種類の手動ビットパーフェクト」でレート/ビット数を
-    //   固定選択している間は、m_modeに基づくaudio-samplerateの上書きを一切
-    //   行わない。これを無条件に実行していたため、次の曲でPlayer::play()が
-    //   applyAudioChain()を呼ぶたびに固定レートが m_mode（既定値"dsd8"）の
-    //   値(352.8kHz)へ強制的に戻ってしまうバグがあった。
-    //   af（DSPチェーン）の構築自体は従来通り行う。
-    if (m_mode == "hires4") {
-        if (isHiRes) {
-            if (!m_manualRateOverride) mpv_set_property_string(m_mpv, "audio-samplerate", "0");
-            // af は空のまま（チェーン・HP補正は後段で appendAf により付加）
-        } else {
-            af = RESAMP;
-            if (!m_manualRateOverride) mpv_set_property_string(m_mpv, "audio-samplerate", "176400");
-        }
-    } else if (m_mode == "dsd8") {
-        af = RESAMP;
-        if (!m_manualRateOverride) mpv_set_property_string(m_mpv, "audio-samplerate", "352800");
-    } else if (m_mode == "loudness") {
-        if (isHiRes) {
-            af = "lavfi=loudnorm=I=-14:TP=-1:LRA=11";
-            if (!m_manualRateOverride) mpv_set_property_string(m_mpv, "audio-samplerate", "0");
-        } else {
-            af = RESAMP;
-            appendAf(af, "lavfi=loudnorm=I=-14:TP=-1:LRA=11");
-            if (!m_manualRateOverride) mpv_set_property_string(m_mpv, "audio-samplerate", "176400");
-        }
-    } else {
-        // pure
-        if (!m_manualRateOverride) mpv_set_property_string(m_mpv, "audio-samplerate", "0");
-        // af は空のまま（チェーン・HP補正は後段で appendAf により付加）
-    }
-
-    // ── 中密度チェーン
-    // [1] プレゼンス帯域（3.2kHz中心）
-    //     中音域の音像・実体感・定位を整える。equalizer は線形位相に近い。
-    // [2] 高域 allpass（8kHz / Q=0.7）
-    //     位相を整えて空間の見通し感・解像度感を出す。振幅特性は変えない。
-    // [3] 空芯コイル特性（lowpass poles=1 / f=45000）
-    //     超高域をなだらかに丸める。インダクタンス成分の自然なロールオフを模倣。
-    // [4] 偶数次高調波（aeval）
-    //     真空管アンプの偶数次倍音構造を付加。係数0.03。
-    const QString chain =
-        "equalizer=f=3200:width_type=o:width=1.5:g=0.5"
-        ",allpass=f=8000:width_type=q:width=0.7"
-        ",lowpass=f=45000:poles=1"
-        ",lavfi=[aeval=exprs='val(0)+0.03*pow(val(0),2)|val(1)+0.03*pow(val(1),2)']";
-
-    // 中密度チェーンON時のみ適用
-    if (m_chainOn) {
-        appendAf(af, chain);
-    }
-
-    // HP補正
-    if (m_hp1) {
-        appendAf(af, "bs2b=cmoy");
-    } else if (m_hp2) {
-        appendAf(af, "bs2b=jmeier");
-    }
-
-    // 音場効果（オプション）
-    if (m_soundField == "wowflutter") {
-        appendAf(af, "vibrato=f=0.5:d=0.0008"); // ワウフラッター（アナログレコード化）
-    } else if (m_soundField == "halltone") {
-        appendAf(af, "aecho=0.98:0.98:60:0.02"); // ホールトーン（3メーター以内の試聴で強化）
-    }
-
-    mpv_set_property_string(m_mpv, "audio-format", "s24"); // 24bit固定出力
-
-    // af を設定（VUメーターは WASAPI ループバック経由のため astats 不要）
-    mpv_set_property_string(m_mpv, "af", af.toUtf8().constData());
-}
-
-// ─────────────────────────────────────────────
-// 音質チェーン適用（再生中リアルタイム切り替え）
-//
-// ★ UIスレッドから直接呼ばれる。TagLib I/O・mutex・stop/play を一切使わない。
-//    m_cachedSr（play()時に設定済み）でハイレゾ判定し、
-//    property更新 + "af set/clr" コマンドのみで完結させる。
-// ─────────────────────────────────────────────
-void Player::applyAudioChainAndReload()
-{
-    // stop → applyAudioChain → loadfile replace → seek 復元
-    //
-    // af プロパティの動的変更は WASAPI 排他モード中や
-    // サンプルレート変更が伴う場合に無視されるため、
-    // 必ず再ロード方式を使う。
-    // 切り替え時に 0.3〜0.5 秒程度の途切れが生じるのは正常動作。
-    if (!m_mpv || !m_playing) return;
-    if (m_currentIndex < 0 || m_currentIndex >= m_playlist.size()) return;
-    if (m_useNewEngine) return;  // ★ 新エンジン再生中はmpvを操作しない
-
-    // ① 現在位置を保存
-    double pos = 0.0;
-    mpv_get_property(m_mpv, "time-pos", MPV_FORMAT_DOUBLE, &pos);
-
-    // ② 停止（WASAPI デバイスを解放）
-    const char *stopCmd[] = {"stop", nullptr};
-    mpv_command(m_mpv, stopCmd);
-    m_playing = false;
-    m_paused  = false;
-
-    // ③ af + audio-samplerate を loadfile 前に確定
-    applyAudioChain();
-
-    // ④ 同じファイルを再ロード
-    QByteArray utf8 = m_playlist[m_currentIndex].toUtf8();
-    const char *loadCmd[] = {"loadfile", utf8.constData(), "replace", nullptr};
-    mpv_command(m_mpv, loadCmd);
-    m_playing = true;
-    m_paused  = false;
-
-    double vol = static_cast<double>(m_volume);
-    mpv_set_property(m_mpv, "volume", MPV_FORMAT_DOUBLE, &vol);
-
-    // ⑤ 再生位置を復元（先頭付近はスキップ）
-    if (pos > 1.0) {
-        QTimer::singleShot(300, this, [this, pos]{
-            if (m_mpv && m_playing) {
-                double p = pos;
-                mpv_set_property(m_mpv, "time-pos", MPV_FORMAT_DOUBLE, &p);
-            }
-        });
-    }
-}
-
-// ─────────────────────────────────────────────
-// 起動ウォームアップ
-// ─────────────────────────────────────────────
-void Player::preWarm()
-{
-    QThread::msleep(200);
-
-    const char *cmd1[] = {
-        "loadfile",
-        "lavfi://anoisesrc=color=pink:amplitude=0.0003:duration=0.8",
-        "replace",
-        nullptr
-    };
-    mpv_command(m_mpv, cmd1);
-
-    double vol = 1.0;
-    mpv_set_property(m_mpv, "volume", MPV_FORMAT_DOUBLE, &vol);
-
-    QThread::msleep(800);
-
-    const char *cmd2[] = {
-        "loadfile",
-        "lavfi://anullsrc=channel_layout=stereo:sample_rate=44100",
-        "replace",
-        nullptr
-    };
-    mpv_command(m_mpv, cmd2);
-
-    QThread::msleep(400);
-
-    double v = m_volume;
-    mpv_set_property(m_mpv, "volume", MPV_FORMAT_DOUBLE, &v);
 }
 
 QStringList Player::collectFiles(const QString &folder, int depth)
@@ -475,96 +169,6 @@ QStringList Player::collectFiles(const QString &folder, int depth)
         files << collectFiles(s.absoluteFilePath(), depth + 1);
 
     return files;
-}
-
-void Player::loadFile(const QString &filePath)
-{
-    QMutexLocker lock(&m_mutex);
-    stop();
-    m_playlist.clear();
-    m_playlist << filePath;
-    m_currentIndex = 0;
-}
-
-// ★ CD再生用：cdda:// URI のリストをそのまま playlist にセット
-void Player::loadPlaylist(const QStringList &paths)
-{
-    QMutexLocker lock(&m_mutex);
-    stop();
-    m_playlist     = paths;
-    m_currentIndex = 0;
-}
-
-// ★ Named Pipe経由CDストリーミング再生
-// mpvにraw PCMストリームとして渡す
-// ★ 再生を止めずにプレイリストを追加・更新
-void Player::appendPlaylist(const QStringList &paths)
-{
-    QMutexLocker lock(&m_mutex);
-    // ★ 現在のインデックスを記録して全曲を追加
-    // 1曲目は既にreplace済みなので2曲目以降をappendで追加
-    int cur = m_currentIndex;
-    m_playlist = paths;
-    m_currentIndex = cur;
-
-    // mpvのプレイリストに2曲目以降を追加
-    for (int i = 1; i < paths.size(); i++) {
-        QByteArray p = paths[i].toUtf8();
-        const char *cmd[] = {"loadfile", p.constData(), "append", nullptr};
-        mpv_command(m_mpv, cmd);
-        qDebug() << "[Player] append:" << paths[i];
-    }
-
-    qDebug() << "[Player] appendPlaylist done: total=" << paths.size();
-}
-
-void Player::clearPlaylist()
-{
-    QMutexLocker lock(&m_mutex);
-    m_playlist.clear();
-    m_currentIndex = 0;
-    m_playing = false;
-    m_paused  = false;
-}
-
-void Player::loadCdDirect(const QString &driveLetter)
-{
-    // First ModeはWAVリッピング方式に変更（cdda://はmpvビルドに依存するため）
-    // この関数は使用しない（MainWindowのstartCdFirstModeで直接制御）
-    Q_UNUSED(driveLetter)
-    qDebug() << "[Player] loadCdDirect: not used";
-}
-
-void Player::loadCdStream(const QString &filePath)
-{
-    QMutexLocker lock(&m_mutex);
-    m_playlist.clear();
-    m_playlist << filePath;
-    m_currentIndex = 0;
-
-    qDebug() << "[Player] loadCdStream:" << filePath;
-
-    // ★ シンプルに通常WAVとして扱う
-    // まず音を出すことを優先（チューニングは後で）
-    // RAM展開再生（init時に設定済み）
-
-    QByteArray path = filePath.toUtf8();
-    const char *cmd[] = {"loadfile", path.constData(), "replace", nullptr};
-    mpv_command(m_mpv, cmd);
-
-    m_playing = true;
-    m_paused  = false;
-
-    double vol = static_cast<double>(m_volume);
-    mpv_set_property(m_mpv, "volume", MPV_FORMAT_DOUBLE, &vol);
-}
-
-void Player::setMediaTitle(const QString &title)
-{
-    QMutexLocker lock(&m_mutex);
-    QByteArray t = title.toUtf8();
-    mpv_set_property_string(m_mpv, "force-media-title", t.constData());
-    qDebug() << "[Player] setMediaTitle:" << title;
 }
 
 void Player::loadFolder(const QString &path)
@@ -625,7 +229,7 @@ void Player::play(int index)
     QString ext;
     if (!isCd) {
         ext = QFileInfo(file).suffix().toLower();
-        if (!SUPPORTED_EXT.contains(ext)) {
+        if (!NEW_ENGINE_EXT.contains(ext)) {
             emit errorOccurred(QString("非対応フォーマット: %1").arg(ext));
             return;
         }
@@ -635,17 +239,14 @@ void Player::play(int index)
 //   ビットパーフェクト)での再生を試みる。排他モード確保失敗など、
 //   何らかの理由で開始できなかった場合は、従来通りmpv経路にフォールバックする。
 bool playedViaNewEngine = false;
-if (!isCd && NEW_ENGINE_EXT.contains(ext)) {
+if (isCd) return; // v10: CDはMainWindow側（MCI）で再生するのでここには来ない
+{
     // ★ 直前の曲がmpv経路（例：MP3）だった場合、mpvはまだWASAPIデバイスを
     //   共有モードで掴んだままになっている。この状態のままWASAPI排他モードを
     //   要求すると、デバイスが使用中と判定され排他確保に失敗する
     //   （＝毎回mpv側へフォールバックしてしまい、実質FLACが新エンジンで
     //    再生されなくなる)。新エンジンの排他確保を試みる前に、必ずmpvを
     //   止めてデバイスを解放しておく。
-    if (m_mpv) {
-        const char *stopCmd[] = {"stop", nullptr};
-        mpv_command(m_mpv, stopCmd);
-    }
     playedViaNewEngine = tryPlayViaNewEngine(file);
 
     // ★ v10: mpvへのフォールバックは廃止。開けなかった曲は理由を知らせて次の曲へ。
@@ -713,45 +314,6 @@ if (playedViaNewEngine) {
             }
         }
     }
-} else {
-    m_useNewEngine = false;
-
-    // ★ ビットパーフェクト自動化：既知の情報でモードを仮決定
-    //   CDは規格上44.1kHz固定のためこの時点で確定できる。
-    //   それ以外（FLAC/MP3等）は前回キャッシュ値で暫定判定し、
-    //   タグ読み取り完了後（onTrackChanged側）に実サンプルレートで再判定・再適用する。
-    if (m_bpAutoOn) {
-        int srForAuto = isCd ? 44100 : m_cachedSr;
-        m_mode = (srForAuto > 48000) ? "pure" : "dsd8";
-    }
-
-    // 音質チェーン適用
-    applyAudioChain();
-
-    // ★ 1曲だけloadfile replace（mpv playlist使用禁止）
-    // mpv playlist + RAW PCM pull の組み合わせはEOFタイミングが壊れる
-    QByteArray utf8 = file.toUtf8();
-    const char *cmd[] = {"loadfile", utf8.constData(), "replace", nullptr};
-    mpv_command(m_mpv, cmd);
-
-    m_playing = true;
-    m_paused  = false;
-
-    // 音量を元に戻す
-    // ★ 新エンジン(ビットパーフェクト)側にはソフト音量調整を意図的に
-    //   実装していない。WASAPI排他での音量減衰はビット深度を犠牲に
-    //   するため、DAC/Windows側のハードウェア音量で調整する設計。
-    double vol = static_cast<double>(m_volume);
-    mpv_set_property(m_mpv, "volume", MPV_FORMAT_DOUBLE, &vol);
-}
-
-// ★ CD再生はタグなし：インデックスのみ通知して終了
-if (isCd) {
-    int capturedIndex = m_currentIndex;
-    QMetaObject::invokeMethod(this, [this, capturedIndex]{
-        emit trackChanged(capturedIndex, QString(), QString(), QString());
-    }, Qt::QueuedConnection);
-    return;
 }
 
 // タグ読み取りを別スレッドで行いUIスレッドをブロックしない
@@ -835,26 +397,6 @@ void Player::fetchTagsAsync(const QString &filePath, int index, int serial)
                 return;
             }
             m_cachedBr   = br;
-            // ★ 新エンジン(FLAC/WASAPI排他)再生中は、実際に鳴っているサンプルレート/
-            //   ビット数(tryPlayViaNewEngine/checkGaplessTransitionで設定済み)を
-            //   タグ読み取り値で上書きしない。また、mpvを操作するapplyAudioChainAndReload()
-            //   も新エンジン側では意味を持たない（むしろmpvが二重に鳴ってしまう）ため
-            //   呼び出さない。
-            if (!m_useNewEngine) {
-                m_cachedSr   = sr;
-                m_cachedBits = bits;
-
-                // ★ ビットパーフェクト自動化：正確なサンプルレート判明後にモードを確定
-                //   48kHz以下(CD/MP3等)は疑似DSD×8(352.8kHz)、48kHz超(ハイレゾ)は原音のまま(pure)
-                if (m_bpAutoOn) {
-                    const QString autoMode = (sr > 48000) ? "pure" : "dsd8";
-                    if (autoMode != m_mode) {
-                        m_mode = autoMode;
-                        if (m_playing) applyAudioChainAndReload();
-                    }
-                }
-            }
-
             emit trackChanged(index, QFileInfo(filePath).fileName(),
                               tagTitle, tagArtist);
         }, Qt::QueuedConnection);
@@ -1103,8 +645,6 @@ void Player::seekTo(double seconds)
                                      static_cast<uint32_t>(m_cachedSr),
                                      static_cast<uint32_t>(m_cachedBits) });
         }
-    } else if (m_mpv) {
-        mpv_set_property(m_mpv, "time-pos", MPV_FORMAT_DOUBLE, &seconds);
     }
 }
 // ──────────────────────────────────────────────────────────────
@@ -1121,12 +661,6 @@ void Player::pause()
         emit playbackPaused();
         return;
     }
-    if (!m_playing) return;
-    int v = 1;
-    mpv_set_property(m_mpv, "pause", MPV_FORMAT_FLAG, &v);
-    m_playing = false;
-    m_paused  = true;
-    emit playbackPaused();
 }
 
 void Player::resume()
@@ -1144,15 +678,7 @@ void Player::resume()
         }
         return;
     }
-    if (m_paused) {
-        int v = 0;
-        mpv_set_property(m_mpv, "pause", MPV_FORMAT_FLAG, &v);
-        m_playing = true;
-        m_paused  = false;
-        emit playbackStarted();
-    } else {
-        play();
-    }
+    play(); // 停止中（新エンジン未使用）なら通常の再生開始
 }
 
 void Player::stop()
@@ -1161,16 +687,8 @@ void Player::stop()
     stopNewEngine();
     m_useNewEngine = false;
 
-    if (m_mpv) {
-        // ★ stopしてプレイリストもクリア
-        const char *stopCmd[] = {"stop", nullptr};
-        mpv_command(m_mpv, stopCmd);
-        const char *clearCmd[] = {"playlist-clear", nullptr};
-        mpv_command(m_mpv, clearCmd);
-    }
     m_playing    = false;
     m_paused     = false;
-    m_realtimeBr = 0;
     emit playbackStopped();
 }
 
@@ -1249,10 +767,6 @@ void Player::onDefaultDeviceChangedRaw(const char *source)
     if (m_playing || m_paused) {
         stopNewEngine();          // WASAPI排他デバイスを解放
         m_useNewEngine = false;
-        if (m_mpv) {
-            const char *stopCmd[] = {"stop", nullptr};
-            mpv_command(m_mpv, stopCmd);
-        }
         m_playing = false;
         m_paused  = false;
         emit playbackStopped();
@@ -1260,14 +774,6 @@ void Player::onDefaultDeviceChangedRaw(const char *source)
         m_unsupportedOutRates.clear(); // 出力先が変わったので対応レートを調べ直す
         deviceLog(QStringLiteral("  -> playback stopped"));
     }
-    // ★ mpvは一度開いたオーディオ出力(ao)を使い回すため、既定デバイスが
-    //   変わっても古いデバイスを掴み続ける（＝アプリ再起動しないと
-    //   切り替わらない）。ここで明示的にaoを開き直させる。
-    if (m_mpv) {
-        const char *reloadCmd[] = {"ao-reload", nullptr};
-        mpv_command(m_mpv, reloadCmd);
-    }
-
     // 切替通知は短時間に連発するので、落ち着いてからメッセージを1回だけ出す
     if (m_stoppedByDeviceChange) m_deviceSettleTimer->start();
 }
@@ -1304,32 +810,13 @@ void Player::setDspOff(bool off)
         if (m_playing || m_paused) {
             reloadNewEngineForRateChange();
         }
-        return;
     }
-    if (m_playing) applyAudioChainAndReload();
-}
-
-void Player::setBitPerfectAuto(bool on)
-{
-    m_bpAutoOn = on;
-    if (on) {
-        // 現在の曲について、既知の情報で即座にモードを反映する
-        bool isCdNow = (m_currentIndex >= 0 && m_currentIndex < m_playlist.size() &&
-                        m_playlist[m_currentIndex].startsWith("cdda://"));
-        int srForAuto = isCdNow ? 44100 : m_cachedSr;
-        m_mode = (srForAuto > 48000) ? "pure" : "dsd8";
-    }
-    if (m_playing) applyAudioChainAndReload();
 }
 
 void Player::setChainOn(bool on)
 {
     m_chainOn = on;
-    if (m_useNewEngine) {
-        m_newEngineDsp.SetChainOn(on);
-        return;
-    }
-    if (m_playing) applyAudioChainAndReload();
+    m_newEngineDsp.SetChainOn(on);
 }
 
 void Player::setShuffle(ShuffleMode mode)
@@ -1816,10 +1303,6 @@ void Player::setVolume(int vol)
     m_volume = qBound(0, vol, 100);
     if (m_newEngineProcessThread)
         m_newEngineProcessThread->SetGain(volumeToGain(m_volume));
-    if (m_mpv) {
-        double v = m_volume;
-        mpv_set_property(m_mpv, "volume", MPV_FORMAT_DOUBLE, &v);
-    }
 }
 
 void Player::setMode(const QString &mode, bool hp1, bool hp2, const QString &soundField)
@@ -1849,10 +1332,6 @@ void Player::setMode(const QString &mode, bool hp1, bool hp2, const QString &sou
         if (m_playing || m_paused) {
             reloadNewEngineForRateChange();
         }
-        return;
-    }
-    if (m_playing) {
-        applyAudioChainAndReload();
     }
 }
 
@@ -1862,18 +1341,6 @@ SoundFieldMode Player::soundFieldModeFromString(const QString &s)
     if (s == "wowflutter") return SoundFieldMode::WowFlutter;
     if (s == "halltone")   return SoundFieldMode::HallTone;
     return SoundFieldMode::None;
-}
-
-void Player::setAudioDevice(const QString &deviceId)
-{
-    if (deviceId.isEmpty())
-        mpv_set_option_string(m_mpv, "audio-device", "auto");
-    else
-        mpv_set_option_string(m_mpv, "audio-device", deviceId.toUtf8().constData());
-
-    bool wasPlaying = m_playing;
-    int idx = m_currentIndex;
-    if (wasPlaying) { stop(); play(idx); }
 }
 
 double Player::getPosition() const
@@ -1891,19 +1358,12 @@ double Player::getPosition() const
         if (pos > m_newEngineDuration) pos = m_newEngineDuration;
         return pos;
     }
-    if (!m_mpv || !m_playing) return 0.0;
-    double pos = 0.0;
-    mpv_get_property(m_mpv, "time-pos", MPV_FORMAT_DOUBLE, &pos);
-    return pos;
+    return 0.0;
 }
 
 double Player::getDuration() const
 {
-    if (m_useNewEngine) return m_newEngineDuration;
-    if (!m_mpv) return 0.0;
-    double dur = 0.0;
-    mpv_get_property(m_mpv, "duration", MPV_FORMAT_DOUBLE, &dur);
-    return dur;
+    return m_useNewEngine ? m_newEngineDuration : 0.0;
 }
 
 QString Player::getTagTitle() const
@@ -1956,8 +1416,6 @@ QString Player::getTagArtist() const
 
 QString Player::getInfo(const QString &mode) const
 {
-    if (!m_mpv) return "";
-
     // コーデック名：再生中はmpvから、再生前は拡張子から
     QString info;
     if (m_playing && m_useNewEngine) {
@@ -1966,26 +1424,13 @@ QString Player::getInfo(const QString &mode) const
         //   「(Always Engine)」表記は、全形式が自作エンジンになったので外した）
         if (m_currentIndex >= 0 && m_currentIndex < m_playlist.size())
             info = QFileInfo(m_playlist[m_currentIndex]).suffix().toUpper();
-    } else if (m_playing) {
-        char *codec = nullptr;
-        mpv_get_property(m_mpv, "audio-codec-name", MPV_FORMAT_STRING, &codec);
-        if (codec) { info = QString(codec).toUpper(); mpv_free(codec); }
     } else {
         if (m_currentIndex < m_playlist.size())
             info = QFileInfo(m_playlist[m_currentIndex]).suffix().toUpper();
     }
 
-    // kbps：demuxer-cache-stateのpacket-bitrateを優先（FLAC等のリアルタイム変動に対応）
-    int br = 0;
-    if (m_playing) {
-        if (m_realtimeBr > 0) {
-            br = m_realtimeBr;
-        } else {
-            double mpvBr = 0.0;
-            mpv_get_property(m_mpv, "audio-bitrate", MPV_FORMAT_DOUBLE, &mpvBr);
-            br = (mpvBr > 0) ? static_cast<int>(mpvBr / 1000.0) : m_cachedBr;
-        }
-    }
+    // kbps：タグから読んだ平均ビットレート（v10: mpvのリアルタイム値は廃止）
+    const int br = m_playing ? m_cachedBr : 0;
 
     // sr/bits はキャッシュ値（onTrackChangedで更新済み）
     int sr   = m_cachedSr;
@@ -2236,14 +1681,5 @@ void Player::getAudioLevels(float &left, float &right) const
         else left = right = 0.f;
         return;
     }
-    if (m_levelMeter)
-        m_levelMeter->getLevels(left, right);
-    else
-        left = right = 0.f;
-}
-
-void Player::setBitPerfectMeter(bool on)
-{
-    if (m_levelMeter)
-        m_levelMeter->setBitPerfect(on);
+    left = right = 0.f;
 }

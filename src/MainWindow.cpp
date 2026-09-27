@@ -6,7 +6,6 @@
 #include "RemoteServer.h"
 #include <QBuffer>
 #include <QCollator>
-#include <mpv/client.h>
 #include <QRadioButton>
 #include <QCheckBox>
 #include <QGroupBox>
@@ -384,16 +383,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 
             // シークスライダー＆時間表示の更新（ドラッグ中は止める）
             if (!m_seekDragging) {
-                double pos = 0.0, duration = 0.0;
-                if (m_player->isUsingNewEngineNow()) {
-                    // ★ 新エンジン(FLAC/WASAPI排他)再生中はmpvプロパティを持たないため、
-                    //   Player側の経過時間トラッキングから取得する。
-                    pos      = m_player->getPosition();
-                    duration = m_player->getDuration();
-                } else {
-                    mpv_get_property(m_player->mpvHandle(), "time-pos",  MPV_FORMAT_DOUBLE, &pos);
-                    mpv_get_property(m_player->mpvHandle(), "duration",  MPV_FORMAT_DOUBLE, &duration);
-                }
+                const double pos      = m_player->getPosition();
+                const double duration = m_player->getDuration();
                 if (duration > 0) {
                     m_seekSlider->setValue(static_cast<int>(pos / duration * 1000));
                     auto fmt = [](double sec) -> QString {
@@ -650,13 +641,8 @@ void MainWindow::publishRemoteStatus()
         // ★ Playerは一時停止中 m_playing=false / m_paused=true になるため、
         //   isPlaying()だけで判定すると一時停止が「停止」に見えてしまう
         state = m_player->isPaused() ? "paused" : "playing";
-        if (m_player->isUsingNewEngineNow()) {
-            pos = m_player->getPosition();
-            dur = m_player->getDuration();
-        } else {
-            mpv_get_property(m_player->mpvHandle(), "time-pos", MPV_FORMAT_DOUBLE, &pos);
-            mpv_get_property(m_player->mpvHandle(), "duration", MPV_FORMAT_DOUBLE, &dur);
-        }
+        pos = m_player->getPosition();
+        dur = m_player->getDuration();
     }
 
     // 音質モードの一覧（ボタンの表示名はCD/ハイレゾで変わるので毎回画面から取る）
@@ -985,7 +971,6 @@ void MainWindow::setupUI()
             //   同一レート判定でスキップされないようキャッシュを無効化する。
             m_lastAppliedRate = -1;
             m_lastAppliedBits = -1;
-            m_player->setBitPerfectMeter(false);
         } else {
             m_bpManualOff = false;  // ★ 手動でONにしたのでフラグ解除
             QVariantList data = act->data().toList();
@@ -1006,7 +991,6 @@ void MainWindow::setupUI()
             m_lastAppliedBits = bits;
             // v10: 選んだ出力形式を自作エンジンへ（再生中なら開き直して即反映）
             m_player->setPinnedOutput(rate, bits);
-            m_player->setBitPerfectMeter(true);
         }
         scheduleSave();  // BitPerfect設定を保存
     });
@@ -1303,19 +1287,10 @@ void MainWindow::setupUI()
             mciSendStringW(L"set cd time format tmsf", nullptr, 0, nullptr);
             return;
         }
-        double duration = 0.0;
-        if (m_player->isUsingNewEngineNow()) {
-            duration = m_player->getDuration();
-            if (duration > 0) {
-                double pos = duration * m_seekSlider->value() / 1000.0;
-                m_player->seekTo(pos);
-            }
-        } else {
-            mpv_get_property(m_player->mpvHandle(), "duration", MPV_FORMAT_DOUBLE, &duration);
-            if (duration > 0) {
-                double pos = duration * m_seekSlider->value() / 1000.0;
-                mpv_set_property(m_player->mpvHandle(), "time-pos", MPV_FORMAT_DOUBLE, &pos);
-            }
+        const double duration = m_player->getDuration();
+        if (duration > 0) {
+            double pos = duration * m_seekSlider->value() / 1000.0;
+            m_player->seekTo(pos);
         }
     });
 
@@ -2189,81 +2164,6 @@ void MainWindow::onTrackChanged(int index, const QString &filename,
                         QString("BitPerfect %1kHz/%2 ▼")
                         .arg(newRate / 1000.0, 0, 'f', newRate % 1000 == 0 ? 0 : 1)
                         .arg(newBits));
-                    m_player->setBitPerfectMeter(true);
-                } else {
-                    // ── mpv経由（MP3/CD/他フォーマット）：モードに応じて
-                    // 出力サンプルレートを決定する。
-                    //   ピュア      : CD(44.1kHz)はそのまま、ハイレゾは原音のまま
-                    //   ハイレゾ×4  : 44.1kHz→176.4kHz、ハイレゾ音源は原音維持
-                    //   疑似DSD×8   : 352.8kHzへアップサンプル
-                    //   ラウドネス×4: 44.1kHz→176.4kHz＋ラウドネス処理
-                    // 出力ビット深度は常に24bit固定（v7以来の仕様）。
-                    int outRate = sr;
-                    int outBits = 24;
-                    QString mode = currentMode();
-                    bool hiRes = (sr > 48000);
-
-                    if (m_bpManualRatePinned) {
-                        // ★ 「16種類の手動ビットパーフェクト」で特定のレート/ビット数を
-                        //   固定選択している間は、モード(dsd8/hires4/loudness/pure)に
-                        //   よる自動決定を一切行わず、選択値をそのまま使う。
-                        outRate = m_pinnedBpRate;
-                        outBits = m_pinnedBpBits;
-                    } else if (!m_player->dspOff()) {
-                        if (mode == "dsd8") {
-                            outRate = 352800;
-                        } else if (mode == "hires4") {
-                            outRate = hiRes ? sr : 176400;
-                        } else if (mode == "loudness") {
-                            outRate = hiRes ? sr : 176400;
-                        }
-                        // pure: outRate = sr（そのまま、原音維持）
-                    }
-
-                    QMenu *bpMenu = m_bitPerfectBtn->menu();
-                    QAction *matched = nullptr;
-                    for (QAction *act : bpMenu->actions()) {
-                        if (act->data().isValid()) {
-                            QVariantList d = act->data().toList();
-                            if (d[0].toInt() == outRate && d[1].toInt() == outBits) {
-                                matched = act;
-                                break;
-                            }
-                        }
-                    }
-                    if (matched) matched->setChecked(true);
-
-                    m_bitPerfectBtn->setText(
-                        QString("BitPerfect %1kHz/%2 ▼")
-                        .arg(outRate / 1000.0, 0, 'f', outRate % 1000 == 0 ? 0 : 1)
-                        .arg(outBits));
-
-                    // ★ mpvへの強制変換命令は、手動OFF中は呼ばない
-                    //   （以前フリーズの原因になったため）。
-                    // ★ 曲間ノイズ対策：前の曲と出力レート/ビット数が同じ場合は
-                    //   audio-exclusive/audio-samplerate の再設定自体をスキップする。
-                    //   同じ値でも再設定するとmpv内部でWASAPI排他ストリームが
-                    //   一度閉じて開き直され、曲間に過渡的なノイズ・無音区間が
-                    //   生じるため（フォーマットが変わらない限り音質上のメリットはない）。
-                    if (!m_bpManualOff) {
-                        if (outRate == m_lastAppliedRate && outBits == m_lastAppliedBits) {
-                            m_player->setBitPerfectMeter(true);
-                            qDebug() << "[BitPerfect] reset skipped (same rate/bits as previous track):"
-                                     << outRate << outBits;
-                        } else {
-                            m_lastAppliedRate = outRate;
-                            m_lastAppliedBits = outBits;
-                            QThreadPool::globalInstance()->start([this, outRate]{
-                                mpv_set_property_string(m_player->mpvHandle(), "audio-exclusive", "yes");
-                                m_player->setBitPerfectMeter(true);
-                                mpv_set_property_string(m_player->mpvHandle(), "audio-samplerate",
-                                    QString::number(outRate).toUtf8().constData());
-                            });
-                        }
-                    } else {
-                        m_player->setBitPerfectMeter(true);
-                        qDebug() << "[BitPerfect] display-only (manual OFF active, mpv command skipped)";
-                    }
                 }
             } // if (sr > 0)
 
@@ -2829,7 +2729,6 @@ void MainWindow::loadFavorites()
                     m_player->setManualRateOverride(true);
                     // v10: 保存されていた出力形式を自作エンジンへ
                     m_player->setPinnedOutput(bpRate, bpBits);
-                    m_player->setBitPerfectMeter(true);
                     break;
                 }
             }
@@ -3427,7 +3326,6 @@ void MainWindow::turnOffBitPerfect()
     //   同一レート判定でスキップされないようキャッシュを無効化する。
     m_lastAppliedRate = -1;
     m_lastAppliedBits = -1;
-    m_player->setBitPerfectMeter(false);
 }
 
 void MainWindow::onCdMetaReady(CdMetaFetcher::Result result)

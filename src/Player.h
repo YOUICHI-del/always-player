@@ -8,7 +8,6 @@
 #include <QElapsedTimer>
 #include <QVector>
 #include <QSet>
-#include <mpv/client.h>
 #include <taglib/fileref.h>
 #include <taglib/tag.h>
 #include <taglib/attachedpictureframe.h>
@@ -19,7 +18,6 @@
 #include <taglib/mp4file.h>
 #include <taglib/mp4tag.h>
 #include <taglib/wavfile.h>
-#include "WasapiLevelMeter.h"
 #include "PcmDualEngine.h"
 #include "WasapiExclusiveOutput.h"
 #include "AudioProcessThread.h"
@@ -37,15 +35,7 @@ public:
     ~Player();
 
     bool init();
-    void preWarm();
     void loadFolder(const QString &path);
-    void loadFile(const QString &filePath);  // 一曲再生
-    void loadPlaylist(const QStringList &paths);  // ★ CD再生用に追加
-    void loadCdStream(const QString &filePath);
-    void setMediaTitle(const QString &title);       // ★ Named Pipe経由CDストリーミング
-    void loadCdDirect(const QString &driveLetter);     // ★ First Mode：mpv直接CD再生
-    void appendPlaylist(const QStringList &paths); // 再生中断なしでプレイリスト更新
-    void clearPlaylist();                              // ★ プレイリストを完全クリア
     void play(int index = -1);
     void pause();
     void resume();
@@ -59,8 +49,6 @@ public:
     bool dspOff() const { return m_dspOff; }
     void setChainOn(bool on); // 中密度チェーン・高調波のみON/OFF（アップサンプリングは維持）
     bool chainOn() const { return m_chainOn; }
-    void setBitPerfectAuto(bool on);  // ビットパーフェクト自動化（CD/MP3→dsd8、ハイレゾ→pure）
-    bool bitPerfectAuto() const { return m_bpAutoOn; }
 
     // ★ MainWindowの「16種類の手動ビットパーフェクト」メニューで特定の
     //   レート/ビット数を固定選択している間、trueにする。
@@ -90,9 +78,6 @@ public:
     //   time-posプロパティへ委譲する。
     //   ※音量調整は新エンジン側に意図的に未実装（Windows/DAC側で調整する設計）。
     void seekTo(double seconds);
-    void setAudioDevice(const QString &deviceId);
-    void setBitPerfectMeter(bool on);  // VUメーター疑似モード切替
-    void disableBitPerfect();  // 排他モード解除（stop→設定→再生は呼び出し側で行う）
 
     // ── v3.0追加
     enum class RepeatMode  { None, One, All };
@@ -123,7 +108,6 @@ public:
     double  getPosition()   const;
     double  getDuration()   const;
     QString mode()          const { return m_mode; }
-    mpv_handle *mpvHandle()  const { return m_mpv; }
     int     volume()        const { return m_volume; }
     int     cachedSr()      const { return m_cachedSr; }
     int     cachedBr()      const { return m_cachedBr; }
@@ -138,10 +122,7 @@ signals:
     void errorOccurred(const QString &msg);
 
 private:
-    void applyAudioChain();
-    void applyAudioChainAndReload();  // 再生中の音質切り替え：チェーン適用＋シークリロード
     QStringList collectFiles(const QString &folder, int depth = 0);
-    void mpvEventLoop();
 
     // ── 新エンジン(PcmDualEngine)統合
     // 対応フォーマット(FLAC/WAV/AIFF/WavPack)を自作エンジン(WASAPI排他)で再生開始する。
@@ -267,7 +248,6 @@ private:
     QString     m_preloadedPath;          // 事前読み込み済みファイルパス
     bool        m_preloadDone       = false; // 現在の曲について事前読み込み済みか
 
-    mpv_handle  *m_mpv          = nullptr;
     QStringList  m_playlist;
     int          m_currentIndex = 0;
     bool         m_playing      = false;
@@ -279,7 +259,6 @@ private:
     bool         m_hp2          = false;
     bool         m_dspOff       = false;  // DSP完全バイパスフラグ
     bool         m_chainOn      = true;   // 中密度チェーン（デフォルトON）
-    bool         m_bpAutoOn     = false;  // ビットパーフェクト自動化フラグ
     bool         m_useNewEngine = false;  // 新エンジン(PcmDualEngine)使用中フラグ
     bool         m_manualRateOverride = false;  // MainWindow側で手動レート固定中フラグ
     int          m_pinRate = 0;                  // v10: 手動指定の出力サンプルレート（0=なし）
@@ -297,15 +276,12 @@ private:
     static const QStringList SUPPORTED_EXT;
     static const QStringList NEW_ENGINE_EXT;  // PcmDualEngine(WASAPI排他)対応フォーマット
 
-    // リアルタイムVUメーター（WASAPI ループバック経由）
-    WasapiLevelMeter *m_levelMeter = nullptr;
 
     // infoラベル用キャッシュ（play()時に更新）
     // ★ m_cachedSrは常に「原音（ネイティブ）」レート。getInfo()のdispMode
     //   判定（hiRes等）がこれを前提にしているため、新エンジンのアップ
     //   サンプリング先レートで上書きしてはいけない。
     int m_cachedBr   = 0;
-    int m_realtimeBr = 0;
     int m_cachedSr   = 0;
     int m_cachedBits = 0;
     // ★ 新エンジンが実際にWASAPIへ出力しているレート（BitPerfect表示専用）。

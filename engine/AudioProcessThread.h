@@ -24,6 +24,9 @@ public:
     void SetDspCallback(DspCallback callback);
     void SetBitPerfect(bool enabled);
     void SetEofQuery(EofQuery query) { m_eofQuery = std::move(query); }
+    // ★ v10: 音量（リニア倍率 0.0〜1.0）。1.0のときは一切計算しない
+    //   （ビットパーフェクトのまま素通し）。1.0未満のときだけ倍精度で掛ける。
+    void SetGain(double gain) { m_gain.store(gain, std::memory_order_relaxed); }
 
     void Start();
     void Stop();
@@ -38,6 +41,7 @@ private:
     DspCallback m_dspCallback;
     EofQuery m_eofQuery;
     std::atomic<bool> m_bitPerfect{true};
+    std::atomic<double> m_gain{1.0};
     std::atomic<bool> m_running{false};
     std::thread m_thread;
 

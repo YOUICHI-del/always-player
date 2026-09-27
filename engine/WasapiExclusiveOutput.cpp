@@ -87,7 +87,14 @@ AudioBackendResult WasapiExclusiveOutput::Initialize(const AudioFormat& format) 
     //   ここで決まった形式への詰め直しはWriteFrames()内で行う。
     //   優先順：32bit(32有効) → 24bit詰め(3byte) → 24bit有効/32bitコンテナ → 16bit
     struct Candidate { uint16_t container; uint16_t valid; };
-    const Candidate candidates[] = { {32, 32}, {24, 24}, {32, 24}, {16, 16} };
+    std::vector<Candidate> candidates = { {32, 32}, {24, 24}, {32, 24}, {16, 16} };
+    // ★ v10: 手動指定のビット数があれば、その形式を先頭に並べ替えて優先する
+    if (m_preferredBits == 16 || m_preferredBits == 24 || m_preferredBits == 32) {
+        std::stable_sort(candidates.begin(), candidates.end(),
+            [this](const Candidate &a, const Candidate &b) {
+                return (a.valid == m_preferredBits) > (b.valid == m_preferredBits);
+            });
+    }
     bool found = false;
     for (const Candidate &c : candidates) {
         m_waveFormat = BuildWaveFormat(format.sampleRate, format.channels, c.container, c.valid);

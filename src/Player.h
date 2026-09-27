@@ -67,7 +67,10 @@ public:
     //   true の間、applyAudioChain()はaudio-samplerateを一切上書きしない
     //   （m_modeに基づく自動レート変更で、MainWindow側の手動固定レートが
     //    次の曲で踏み潰されてしまうバグの修正）。
-    void setManualRateOverride(bool active) { m_manualRateOverride = active; }
+    // ★ v10: 手動ビットパーフェクト。falseで解除（自動に戻す）。
+    void setManualRateOverride(bool active);
+    // ★ v10: 手動ビットパーフェクトで選んだ出力形式を新エンジンに反映する
+    void setPinnedOutput(int rate, int bits);
     bool manualRateOverride() const { return m_manualRateOverride; }
 
     // ── 新エンジン(PcmDualEngine)統合
@@ -80,7 +83,8 @@ public:
     //   が使う「原音」レート）とは意図的に別管理にしている
     //  （両者を混同するとgetInfo()側のhiRes判定が循環してしまうため）。
     uint32_t newEngineActualSampleRate() const { return static_cast<uint32_t>(m_newEngineOutputSr); }
-    uint32_t newEngineActualBits() const { return static_cast<uint32_t>(m_cachedBits); }
+    // v10: 元の音源のビット数ではなく、実際にDACへ出しているビット数（16/24/32）
+    uint32_t newEngineActualBits() const { return m_newEngineOutput.GetValidBits(); }
 
     // ★ シーク：新エンジン再生中はPcmDualEngine::Seek()、それ以外はmpvの
     //   time-posプロパティへ委譲する。
@@ -278,6 +282,10 @@ private:
     bool         m_bpAutoOn     = false;  // ビットパーフェクト自動化フラグ
     bool         m_useNewEngine = false;  // 新エンジン(PcmDualEngine)使用中フラグ
     bool         m_manualRateOverride = false;  // MainWindow側で手動レート固定中フラグ
+    int          m_pinRate = 0;                  // v10: 手動指定の出力サンプルレート（0=なし）
+    int          m_pinBits = 0;                  // v10: 手動指定の出力ビット数（0=自動）
+    int          m_consecutiveEngineFailures = 0; // v10: 連続で再生できなかった曲数（無限スキップ防止）
+    QString      m_lastEngineError;               // v10: 再生できなかった理由（表示用）
     QString      m_soundField;
     QMutex       m_mutex;
     RepeatMode   m_repeatMode  = RepeatMode::None;

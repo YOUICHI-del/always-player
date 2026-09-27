@@ -333,6 +333,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     connect(m_player, &Player::playbackStarted, this, &MainWindow::onPlaybackStarted);
     connect(m_player, &Player::playbackStopped, this, &MainWindow::onPlaybackStopped);
     connect(m_player, &Player::playbackPaused,  this, &MainWindow::onPlaybackPaused);
+    // v10: 再生できなかった曲の理由をステータス欄に表示（その後は次の曲へ進む）
+    connect(m_player, &Player::errorOccurred, this, [this](const QString &msg){
+        if (m_statusBar) m_statusBar->setText(QString::fromUtf8("\xe2\x9a\xa0 ") + msg);
+    });
 
     m_infoTimer = new QTimer(this);
     connect(m_infoTimer, &QTimer::timeout, [this]{
@@ -933,7 +937,8 @@ void MainWindow::setupUI()
     bpMenu->setObjectName("bitPerfectMenu");
 
     // OFF
-    m_bpActOff = bpMenu->addAction(jp("OFF\xef\xbc\x88\xe5\x85\xb1\xe6\x9c\x89\xe3\x83\xa2\xe3\x83\xbc\xe3\x83\x89\xef\xbc\x89"));
+    // v10: 共有モードは無くなったので「自動（モード連動）」に名称変更
+    m_bpActOff = bpMenu->addAction(QString::fromUtf8("\xe8\x87\xaa\xe5\x8b\x95\xef\xbc\x88\xe3\x83\xa2\xe3\x83\xbc\xe3\x83\x89\xe9\x80\xa3\xe5\x8b\x95\xef\xbc\x89"));
     m_bpActOff->setCheckable(true);
     m_bpActOff->setChecked(true);
     bpMenu->addSeparator();
@@ -980,10 +985,7 @@ void MainWindow::setupUI()
             //   同一レート判定でスキップされないようキャッシュを無効化する。
             m_lastAppliedRate = -1;
             m_lastAppliedBits = -1;
-            QThreadPool::globalInstance()->start([this]{
-                mpv_set_property_string(m_player->mpvHandle(), "audio-exclusive", "no");
-                m_player->setBitPerfectMeter(false);
-            });
+            m_player->setBitPerfectMeter(false);
         } else {
             m_bpManualOff = false;  // ★ 手動でONにしたのでフラグ解除
             QVariantList data = act->data().toList();
@@ -1002,12 +1004,9 @@ void MainWindow::setupUI()
             qDebug() << "[BitPerfect] rate=" << rate << "bits=" << bits;
             m_lastAppliedRate = rate;
             m_lastAppliedBits = bits;
-            QThreadPool::globalInstance()->start([this, rate]{
-                mpv_set_property_string(m_player->mpvHandle(), "audio-exclusive", "yes");
-                m_player->setBitPerfectMeter(true);
-                mpv_set_property_string(m_player->mpvHandle(), "audio-samplerate",
-                    QString::number(rate).toUtf8().constData());
-            });
+            // v10: 選んだ出力形式を自作エンジンへ（再生中なら開き直して即反映）
+            m_player->setPinnedOutput(rate, bits);
+            m_player->setBitPerfectMeter(true);
         }
         scheduleSave();  // BitPerfect設定を保存
     });
@@ -2181,7 +2180,10 @@ void MainWindow::onTrackChanged(int index, const QString &filename,
                             }
                         }
                     }
-                    if (matched2) matched2->setChecked(true);
+                    // v10: 手動指定中はその項目、自動のときは「自動（モード連動）」に
+                    //      チェックを付ける（ボタンの文字は常に実際の出力形式）。
+                    if (m_bpManualRatePinned) { if (matched2) matched2->setChecked(true); }
+                    else if (m_bpActOff) m_bpActOff->setChecked(true);
 
                     m_bitPerfectBtn->setText(
                         QString("BitPerfect %1kHz/%2 ▼")
@@ -2825,12 +2827,9 @@ void MainWindow::loadFavorites()
                     m_pinnedBpRate = bpRate;
                     m_pinnedBpBits = bpBits;
                     m_player->setManualRateOverride(true);
-                    QThreadPool::globalInstance()->start([this, bpRate]{
-                        mpv_set_property_string(m_player->mpvHandle(), "audio-exclusive", "yes");
-                m_player->setBitPerfectMeter(true);
-                        mpv_set_property_string(m_player->mpvHandle(), "audio-samplerate",
-                            QString::number(bpRate).toUtf8().constData());
-                    });
+                    // v10: 保存されていた出力形式を自作エンジンへ
+                    m_player->setPinnedOutput(bpRate, bpBits);
+                    m_player->setBitPerfectMeter(true);
                     break;
                 }
             }
@@ -3428,11 +3427,7 @@ void MainWindow::turnOffBitPerfect()
     //   同一レート判定でスキップされないようキャッシュを無効化する。
     m_lastAppliedRate = -1;
     m_lastAppliedBits = -1;
-    // mpv property change in worker thread (WASAPI device reinit)
-    QThreadPool::globalInstance()->start([this]{
-        mpv_set_property_string(m_player->mpvHandle(), "audio-exclusive", "no");
-        m_player->setBitPerfectMeter(false);
-    });
+    m_player->setBitPerfectMeter(false);
 }
 
 void MainWindow::onCdMetaReady(CdMetaFetcher::Result result)

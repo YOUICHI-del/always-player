@@ -34,6 +34,9 @@ public:
     //   PcmDualEngine側のリングが空になっても、ここにはまだ数十ms分の
     //   音が残っているため、これを待たずに次曲へ進むと曲尾が切れてしまう。
     // ★ v10診断用：直近のInitialize()で失敗したHRESULT（成功ならS_OK）
+    // ★ v10: ビットパーフェクト手動指定用。次のInitialize()で優先して試す
+    //   有効ビット数（16/24/32）。0なら自動（32→24→24in32→16の順）。
+    void SetPreferredBits(int bits) { m_preferredBits = bits; }
     long GetLastHr() const { return m_lastHr; }
     // v10診断用：合意したコンテナ幅／有効ビット数
     uint16_t GetContainerBits() const { return m_containerBits; }
@@ -114,6 +117,7 @@ private:
     // v10: デバイスと合意したコンテナ幅／有効ビット数と、詰め直し用バッファ
     uint16_t m_containerBits = 32;
     uint16_t m_validBits = 32;
+    int m_preferredBits = 0;
     long long m_defaultPeriod = 0;
     long long m_minPeriod = 0;
     std::vector<uint8_t> m_convBuf;

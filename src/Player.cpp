@@ -26,6 +26,17 @@
 //   （調査専用の一時的な計測用。恒久的な機能ではない）
 static qint64 dbgMs() { return static_cast<qint64>(GetTickCount64()); }
 
+// ★ v10: スライダー位置(0〜100)→リニア倍率。mpvと同じ3乗カーブで、
+//   以前と同じ操作感にする。100なら厳密に1.0（ビットパーフェクトのまま）。
+static double volumeToGain(int vol)
+{
+    if (vol >= 100) return 1.0;
+    if (vol <= 0)   return 0.0;
+    const double x = vol / 100.0;
+    return x * x * x;
+}
+
+
 
 const QStringList Player::SUPPORTED_EXT = {
     "mp3","aac","ogg","wav","flac","opus","dsf","dff","m4a","aiff","wv"
@@ -636,6 +647,30 @@ if (!isCd && NEW_ENGINE_EXT.contains(ext)) {
         mpv_command(m_mpv, stopCmd);
     }
     playedViaNewEngine = tryPlayViaNewEngine(file);
+
+    // ★ v10: mpvへのフォールバックは廃止。開けなかった曲は理由を知らせて次の曲へ。
+    //   全曲が開けない場合などに無限に送り続けないよう、連続失敗が
+    //   プレイリストの曲数に達したら止める。1曲リピート中は送らない。
+    if (!playedViaNewEngine) {
+        m_useNewEngine = false;
+        m_playing = false;
+        m_paused  = false;
+        const QString name = QFileInfo(file).fileName();
+        const QString reason = m_lastEngineError.isEmpty()
+            ? QString::fromUtf8("再生できませんでした") : m_lastEngineError;
+        QMetaObject::invokeMethod(this, [this, name, reason]{
+            emit errorOccurred(QString::fromUtf8("再生できません：%1（%2）").arg(name, reason));
+        }, Qt::QueuedConnection);
+        ++m_consecutiveEngineFailures;
+        if (m_repeatMode != RepeatMode::One && m_consecutiveEngineFailures < m_playlist.size()) {
+            QTimer::singleShot(300, this, [this]{ next(); });
+        } else {
+            m_consecutiveEngineFailures = 0;
+            QMetaObject::invokeMethod(this, [this]{ emit playbackStopped(); }, Qt::QueuedConnection);
+        }
+        return;
+    }
+    m_consecutiveEngineFailures = 0;
 }
 
 if (playedViaNewEngine) {
@@ -833,8 +868,11 @@ bool Player::tryPlayViaNewEngine(const QString &filePath)
 
     const std::string extLower = QFileInfo(filePath).suffix().toLower().toStdString();
     if (!m_pcmEngine.Open(filePath.toStdWString(), extLower)) {
+        m_lastEngineError = QString::fromUtf8("この形式・内容のファイルには対応していません");
         return false;
     }
+    // v10: 手動ビットパーフェクトのビット数を優先（なければ自動）
+    m_newEngineOutput.SetPreferredBits(m_manualRateOverride ? m_pinBits : 0);
 
     // ★ アップサンプリング(dsd8/hires4)：ネイティブ（原音）レートを基に
     //   目標レートを決定し、PcmDualEngine側のSincResamplerへ反映する。
@@ -886,6 +924,9 @@ bool Player::tryPlayViaNewEngine(const QString &filePath)
         break; // 形式以外の理由（デバイス使用中など）はレートを下げても無駄
     }
     if (initResult != AudioBackendResult::Ok) {
+        m_lastEngineError = (initResult == AudioBackendResult::FormatNotSupported)
+            ? QString::fromUtf8("出力デバイスがこの形式に対応していません")
+            : QString::fromUtf8("出力デバイスを開けませんでした（他のアプリが使用中の可能性があります）");
         // ★ 排他モード確保失敗などの場合、呼び出し側でmpv経路にフォールバックする。
         //   Initialize()が途中まで成功していた場合（IAudioClient::Initializeで
         //   排他ロックを確保した後、SetEventHandle等で失敗した場合など）に
@@ -914,6 +955,7 @@ bool Player::tryPlayViaNewEngine(const QString &filePath)
         m_newEngineDsp.Process(buf, n);
     });
     m_newEngineProcessThread->SetBitPerfect(m_dspOff);
+    m_newEngineProcessThread->SetGain(volumeToGain(m_volume)); // v10: 音量
     // ★ 真の終端（ギャップレスで次曲へ継続しない、本当のストリーム終端）でのみ、
     //   リングバッファに残った端数フレームをゼロ埋めして出力するための問い合わせ。
     //   ギャップレス遷移中はIsEndOfStream()がfalseのままなので、この端数フラッシュは
@@ -963,7 +1005,15 @@ bool Player::tryPlayViaNewEngine(const QString &filePath)
 //     既存方針を維持。upsampling併用は将来検討）
 uint32_t Player::computeNewEngineTargetRate(uint32_t nativeRate) const
 {
-    if (m_dspOff || nativeRate == 0) return nativeRate;
+    if (nativeRate == 0) return nativeRate;
+    // ★ v10: 手動ビットパーフェクトで出力レートが指定されていれば、それが最優先
+    //   （デバイスが受け付けなければ半分ずつ下げる）。
+    if (m_manualRateOverride && m_pinRate > 0) {
+        uint32_t target = static_cast<uint32_t>(m_pinRate);
+        while (target > 44100 && m_unsupportedOutRates.contains(target)) target /= 2;
+        return target;
+    }
+    if (m_dspOff) return nativeRate;
     const bool isHiRes = (nativeRate > 48000);
     uint32_t target = nativeRate; // pure / loudness
     if (m_mode == "dsd8") {
@@ -1741,9 +1791,31 @@ void Player::preloadNextFile(const QString &path)
 }
 
 
+void Player::setManualRateOverride(bool active)
+{
+    const bool wasPinned = m_manualRateOverride && m_pinRate > 0;
+    m_manualRateOverride = active;
+    if (!active) {
+        m_pinRate = m_pinBits = 0;
+        // 手動指定を解除したので、自動の出力形式で開き直す
+        if (wasPinned && m_useNewEngine) reloadNewEngineForRateChange();
+    }
+}
+
+void Player::setPinnedOutput(int rate, int bits)
+{
+    const bool changed = !(m_manualRateOverride && m_pinRate == rate && m_pinBits == bits);
+    m_manualRateOverride = true;
+    m_pinRate = rate;
+    m_pinBits = bits;
+    if (changed && m_useNewEngine) reloadNewEngineForRateChange();
+}
+
 void Player::setVolume(int vol)
 {
     m_volume = qBound(0, vol, 100);
+    if (m_newEngineProcessThread)
+        m_newEngineProcessThread->SetGain(volumeToGain(m_volume));
     if (m_mpv) {
         double v = m_volume;
         mpv_set_property(m_mpv, "volume", MPV_FORMAT_DOUBLE, &v);
@@ -1890,11 +1962,10 @@ QString Player::getInfo(const QString &mode) const
     QString info;
     if (m_playing && m_useNewEngine) {
         // ★ v10: 自作エンジン再生中はmpvが止まっているのでコーデック名を
-        //   mpvから取れない。拡張子＋エンジン名を表示して、どちらの経路で
-        //   鳴っているかひと目で分かるようにする。
+        //   mpvから取れないので、拡張子を表示する。（開発中に入れていた
+        //   「(Always Engine)」表記は、全形式が自作エンジンになったので外した）
         if (m_currentIndex >= 0 && m_currentIndex < m_playlist.size())
             info = QFileInfo(m_playlist[m_currentIndex]).suffix().toUpper();
-        info += " (Always Engine)";
     } else if (m_playing) {
         char *codec = nullptr;
         mpv_get_property(m_mpv, "audio-codec-name", MPV_FORMAT_STRING, &codec);
@@ -1944,6 +2015,13 @@ QString Player::getInfo(const QString &mode) const
     }
 
     info += QString(" | %1 kbps").arg(br);
+    // ★ v10: 自作エンジン再生中は、モードから推定した値ではなく、実際にDACへ
+    //   出している値を表示する（DACが352.8kHzを受け付けず176.4kHzに下げた場合や、
+    //   手動ビットパーフェクトで出力形式を指定した場合に、表示が食い違っていた）。
+    if (m_useNewEngine && m_newEngineOutputSr > 0) {
+        outKhz  = m_newEngineOutputSr / 1000.0;
+        outBits = m_newEngineOutput.GetValidBits();
+    }
     if (outKhz > 0)
         info += QString(" | %1 kHz").arg(outKhz, 0, 'f', 1);
     info += QString(" / %1bit").arg(outBits);

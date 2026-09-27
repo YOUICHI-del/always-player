@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <chrono>
 #include <algorithm>
+#include <cmath>
 
 AudioProcessThread::AudioProcessThread(AudioRingBuffer* sourceRing, IAudioOutputBackend* backend)
     : m_sourceRing(sourceRing), m_backend(backend) {
@@ -46,7 +47,13 @@ void AudioProcessThread::ThreadProc() {
         //   読み直す実装のため、サンプル境界がずれる上にバッファの範囲外を
         //   読みに行く実害のあるバグだった。二重にパッキングしないこと。）
         bool bitPerfect = m_bitPerfect.load(std::memory_order_relaxed);
+        const double gain = m_gain.load(std::memory_order_relaxed);
         if (bitPerfect || !m_dspCallback) {
+            // ★ v10: 音量が100%未満のときだけ倍精度で掛ける（100%なら値は一切不変）
+            if (gain < 1.0) {
+                for (size_t i = 0; i < samplesPerChunk; ++i)
+                    s32Chunk[i] = static_cast<int32_t>(std::lrint(static_cast<double>(s32Chunk[i]) * gain));
+            }
             // ★ ビットパーフェクト経路：値そのものは一切変換しない。
             m_backend->WriteFrames(reinterpret_cast<const uint8_t*>(s32Chunk.data()),
                                     static_cast<uint32_t>(m_chunkFrames));
@@ -75,7 +82,7 @@ void AudioProcessThread::ThreadProc() {
             //   届かないため再現しなかった。doubleで計算・クリップしてから変換する。
             constexpr double kFullScaleD = 2147483647.0;
             for (size_t i = 0; i < samplesPerChunk; ++i) {
-                double v = static_cast<double>(floatChunk[i]) * kFullScaleD;
+                double v = static_cast<double>(floatChunk[i]) * kFullScaleD * gain;
                 if (v >  kFullScaleD) v =  kFullScaleD;
                 if (v < -kFullScaleD) v = -kFullScaleD;
                 s32Chunk[i] = static_cast<int32_t>(v);

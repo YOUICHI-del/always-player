@@ -421,50 +421,67 @@ bool Player::tryPlayViaNewEngine(const QString &filePath)
     //   m_dspOffがtrueの間は常にネイティブレート（リサンプルなし）になる
     //   （computeNewEngineTargetRate()内で判定）。
     const uint32_t nativeRate = m_pcmEngine.GetNativeSampleRate();
+    // ★ v10: 共有モードで鳴らしている機器は、Windowsの「既定の形式」が途中で
+    //   変更されていても追従できるよう、開くたびにレートを問い合わせ直す。
+    if (m_deviceSharedMode) {
+        const uint32_t mr = m_newEngineOutput.QueryMixRate();
+        if (mr > 0) m_deviceFixedRate = mr;
+    }
     const uint32_t targetRate = computeNewEngineTargetRate(nativeRate);
 
     // ★ v10: 出力デバイスが目標レート（例：疑似DSD×8の352.8kHz）に排他モードで
     //   対応していない場合、以前はそのままmpvへ逃げていた。今は半分ずつ
     //   (352.8→176.4→88.2kHz…)下げて、デバイスが受け付ける一番高いレートを
     //   自動で選ぶ。最後はネイティブ（原音）レート。
+    // ★ v10: 前回までに「この機器は特定のレート／共有モードでしか鳴らない」と
+    //   わかっていれば、最初からその形で開く（ギャップレス判定とも一致させる）。
+    m_newEngineOutput.SetSharedMode(m_deviceSharedMode);
+
     QList<uint32_t> candidates;
     candidates << targetRate;
-    for (uint32_t r = targetRate / 2; r > nativeRate && r >= 44100; r /= 2)
-        candidates << r;
-    if (!candidates.contains(nativeRate)) candidates << nativeRate;
+    if (m_deviceFixedRate == 0) {
+        for (uint32_t r = targetRate / 2; r > nativeRate && r >= 44100; r /= 2)
+            candidates << r;
+        if (!candidates.contains(nativeRate)) candidates << nativeRate;
+    }
 
     AudioFormat fmt;
     AudioBackendResult initResult = AudioBackendResult::UnknownError;
     for (uint32_t candidate : candidates) {
-        m_pcmEngine.SetTargetSampleRate(candidate);
-
-        fmt.sampleRate   = m_pcmEngine.GetSampleRate(); // リサンプル後（目標）レート
-        fmt.channels     = static_cast<uint16_t>(m_pcmEngine.GetTotalChannels());
-        fmt.sampleFormat = AudioSampleFormat::Int32;
-
-        // ★ 直前にmpvへ"stop"を送っていても、実際のWASAPIデバイス解放はmpvの
-        //   内部オーディオスレッドで非同期に行われるため、ごくわずかに遅延する
-        //   ことがある。その隙間でここに来ると「デバイス使用中」で排他確保に
-        //   失敗しうるため、短い待機を挟みながら数回だけ再試行する。
-        //   （形式非対応は待っても変わらないので、すぐ次の候補レートへ）
-        for (int attempt = 0; attempt < 4; ++attempt) {
-            if (attempt > 0) {
-                m_newEngineOutput.Shutdown();
-                QThread::msleep(50);
-            }
-            initResult = m_newEngineOutput.Initialize(fmt);
-            if (initResult == AudioBackendResult::Ok) break;
-            if (initResult == AudioBackendResult::FormatNotSupported) break;
-        }
-        if (initResult == AudioBackendResult::Ok) break;
-
-        m_newEngineOutput.Shutdown();
+        if (tryInitOutput(candidate, initResult)) break;
         if (initResult == AudioBackendResult::FormatNotSupported) {
-            m_unsupportedOutRates.insert(fmt.sampleRate);
+            m_unsupportedOutRates.insert(candidate);
             continue;
         }
         break; // 形式以外の理由（デバイス使用中など）はレートを下げても無駄
     }
+
+    // ★ v10: どのレートでも開けなかった場合（Bluetoothなど）。
+    //   ① 機器本来の形式（Windowsの「既定の形式」）のレートで、排他モードを試す。
+    //   ② それも断られたら、共有モードで鳴らす（レートは同じく既定の形式に合わせ、
+    //      周波数変換はAlways Engine自身のリサンプラーで行う）。
+    if (initResult != AudioBackendResult::Ok) {
+        // 他のアプリがDACを使っていて排他を取れなかっただけなら、共有モードで
+        // 鳴らすのはこの曲だけにする（次の曲では改めて排他モードを試す）。
+        const bool deviceBusy = (m_newEngineOutput.GetLastHr() == AUDCLNT_E_DEVICE_IN_USE);
+        const uint32_t mixRate = m_newEngineOutput.QueryMixRate();
+        if (mixRate > 0) {
+            bool ok = false;
+            if (!candidates.contains(mixRate) || m_deviceSharedMode) {
+                m_newEngineOutput.SetSharedMode(false);
+                ok = tryInitOutput(mixRate, initResult);
+                if (ok) { m_deviceFixedRate = mixRate; m_deviceSharedMode = false; }
+            }
+            if (!ok) {
+                m_newEngineOutput.SetSharedMode(true);
+                ok = tryInitOutput(mixRate, initResult);
+                if (ok && !deviceBusy) { m_deviceFixedRate = mixRate; m_deviceSharedMode = true; }
+                if (!ok) m_newEngineOutput.SetSharedMode(false);
+            }
+        }
+    }
+    fmt = m_newEngineOutput.GetActualFormat();
+    fmt.sampleRate = m_pcmEngine.GetSampleRate();
     if (initResult != AudioBackendResult::Ok) {
         m_lastEngineError = (initResult == AudioBackendResult::FormatNotSupported)
             ? QString::fromUtf8("出力デバイスがこの形式に対応していません")
@@ -538,6 +555,29 @@ bool Player::tryPlayViaNewEngine(const QString &filePath)
     return true;
 }
 
+// ★ v10: 指定レートで出力デバイスを開く（排他／共有はSetSharedMode()の指定どおり）。
+//   デバイス解放の遅れで「使用中」になることがあるので、短い待機を挟んで数回試す。
+//   形式非対応は待っても変わらないので、すぐに諦める。
+bool Player::tryInitOutput(uint32_t rate, AudioBackendResult &result)
+{
+    m_pcmEngine.SetTargetSampleRate(rate);
+    AudioFormat fmt;
+    fmt.sampleRate   = m_pcmEngine.GetSampleRate(); // リサンプル後（目標）レート
+    fmt.channels     = static_cast<uint16_t>(m_pcmEngine.GetTotalChannels());
+    fmt.sampleFormat = AudioSampleFormat::Int32;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        if (attempt > 0) {
+            m_newEngineOutput.Shutdown();
+            QThread::msleep(50);
+        }
+        result = m_newEngineOutput.Initialize(fmt);
+        if (result == AudioBackendResult::Ok) return true;
+        if (result == AudioBackendResult::FormatNotSupported) break;
+    }
+    m_newEngineOutput.Shutdown();
+    return false;
+}
+
 // ★ 新エンジン用のアップサンプリング目標レートを決定する。
 //   mpv経路のapplyAudioChain()と同じルールを踏襲：
 //   ・m_dspOff中は常にネイティブレート（リサンプルなし、ビットパーフェクト優先）
@@ -548,6 +588,9 @@ bool Player::tryPlayViaNewEngine(const QString &filePath)
 uint32_t Player::computeNewEngineTargetRate(uint32_t nativeRate) const
 {
     if (nativeRate == 0) return nativeRate;
+    // ★ v10: 機器が特定のレートしか受け付けない（Bluetooth等）とわかっていれば、
+    //   常にそのレートへ変換して出す。
+    if (m_deviceFixedRate > 0) return m_deviceFixedRate;
     // ★ v10: 手動ビットパーフェクトで出力レートが指定されていれば、それが最優先
     //   （デバイスが受け付けなければ半分ずつ下げる）。
     if (m_manualRateOverride && m_pinRate > 0) {
@@ -755,6 +798,11 @@ void Player::onDefaultDeviceChangedRaw(const char *source)
 
     if (newId == m_currentDeviceId) return;   // 変化なし
     m_currentDeviceId = newId;
+    // ★ v10: 出力先が変わったので、対応レート・共有モードの判定を調べ直す
+    //   （以前は再生中に切り替えたときだけリセットしていた）。
+    m_unsupportedOutRates.clear();
+    m_deviceFixedRate  = 0;
+    m_deviceSharedMode = false;
 
     deviceLog(QStringLiteral("[%1] CHANGED -> \"%2\" enumerator=%3 formFactor=%4 kind=%5 | playing=%6 paused=%7 newEngine=%8")
               .arg(QLatin1String(source))
@@ -771,7 +819,6 @@ void Player::onDefaultDeviceChangedRaw(const char *source)
         m_paused  = false;
         emit playbackStopped();
         m_stoppedByDeviceChange = true;
-        m_unsupportedOutRates.clear(); // 出力先が変わったので対応レートを調べ直す
         deviceLog(QStringLiteral("  -> playback stopped"));
     }
     // 切替通知は短時間に連発するので、落ち着いてからメッセージを1回だけ出す
@@ -1469,7 +1516,11 @@ QString Player::getInfo(const QString &mode) const
     }
     if (outKhz > 0)
         info += QString(" | %1 kHz").arg(outKhz, 0, 'f', 1);
-    info += QString(" / %1bit").arg(outBits);
+    // v10: 共有モード（Bluetoothなど）はビット数ではなく「共有モード」と表示
+    if (isSharedOutput())
+        info += QString::fromUtf8(" / 共有モード");
+    else
+        info += QString(" / %1bit").arg(outBits);
     return info;
 }
 

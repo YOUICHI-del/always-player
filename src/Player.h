@@ -73,6 +73,8 @@ public:
     uint32_t newEngineActualSampleRate() const { return static_cast<uint32_t>(m_newEngineOutputSr); }
     // v10: 元の音源のビット数ではなく、実際にDACへ出しているビット数（16/24/32）
     uint32_t newEngineActualBits() const { return m_newEngineOutput.GetValidBits(); }
+    // v10: 共有モード（Bluetoothなど）で鳴らしているか。表示用。
+    bool isSharedOutput() const { return m_useNewEngine && m_newEngineOutput.IsSharedMode(); }
 
     // ★ シーク：新エンジン再生中はPcmDualEngine::Seek()、それ以外はmpvの
     //   time-posプロパティへ委譲する。
@@ -289,6 +291,13 @@ private:
     int m_newEngineOutputSr = 0;
     // v10: 今の出力デバイスが排他モードで受け付けなかった出力レート
     QSet<uint32_t> m_unsupportedOutRates;
+    // v10: 今の出力デバイスが特定のレートしか受け付けない場合、そのレート（0=制限なし）。
+    //   ・排他モードで、機器本来の形式（Windowsの既定の形式）のレートだけ通った場合
+    //   ・排他モードを断られ、共有モードで鳴らしている場合（Bluetoothなど）
+    //   出力先が変わったらリセットして調べ直す。
+    uint32_t m_deviceFixedRate = 0;
+    bool     m_deviceSharedMode = false;
+    bool tryInitOutput(uint32_t rate, AudioBackendResult &result);
 
     // タグ読み取りスレッドの世代管理（古いスレッド結果を破棄するためのシリアル番号）
     int m_playSerial = 0;

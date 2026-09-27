@@ -2160,6 +2160,13 @@ void MainWindow::onTrackChanged(int index, const QString &filename,
                     if (m_bpManualRatePinned) { if (matched2) matched2->setChecked(true); }
                     else if (m_bpActOff) m_bpActOff->setChecked(true);
 
+                    // v10: 共有モード（Bluetoothなど）はビットパーフェクトではないので、
+                    //      そうとわかる表示にする
+                    if (m_player->isSharedOutput())
+                        m_bitPerfectBtn->setText(
+                            QString::fromUtf8("共有モード %1kHz ▼")
+                            .arg(newRate / 1000.0, 0, 'f', newRate % 1000 == 0 ? 0 : 1));
+                    else
                     m_bitPerfectBtn->setText(
                         QString("BitPerfect %1kHz/%2 ▼")
                         .arg(newRate / 1000.0, 0, 'f', newRate % 1000 == 0 ? 0 : 1)

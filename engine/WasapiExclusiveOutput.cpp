@@ -82,6 +82,32 @@ AudioBackendResult WasapiExclusiveOutput::Initialize(const AudioFormat& format) 
     hr = m_device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &m_audioClient);
     if (FAILED(hr)) { m_lastHr = hr; return AudioBackendResult::DeviceNotFound; }
 
+    m_float = false;
+    if (m_shared) {
+        // ★ v10: 共有モード（Bluetoothなど排他モードを受け付けない機器用）。
+        //   32bit float・ステレオで開く。レートは呼び出し側がWindowsの
+        //   「既定の形式」に合わせてあるので、Windows側で周波数変換は起きない
+        //   （AUTOCONVERTPCMは、チャンネル数が違う機器でも開けるようにする保険）。
+        //   バッファは40ms。Bluetoothは遅延が大きく揺れるため、排他より多めに取る。
+        m_waveFormat = BuildWaveFormat(format.sampleRate, format.channels, 32, 32);
+        m_waveFormat.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+        REFERENCE_TIME defaultPeriod = 0, minPeriod = 0;
+        m_audioClient->GetDevicePeriod(&defaultPeriod, &minPeriod);
+        m_defaultPeriod = defaultPeriod;
+        m_minPeriod     = minPeriod;
+        const REFERENCE_TIME sharedBuffer = 400000; // 40ms（100ns単位）
+        hr = m_audioClient->Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+                | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+            sharedBuffer, 0,
+            reinterpret_cast<WAVEFORMATEX*>(&m_waveFormat),
+            nullptr);
+        if (FAILED(hr)) { m_lastHr = hr; return AudioBackendResult::UnknownError; }
+        m_containerBits = 32;
+        m_validBits     = 32;
+        m_float         = true;
+    } else {
     // ★ v10: 受け付けるコンテナ形式をデバイスに順に問い合わせる。
     //   上位（AudioProcessThread）からは常に左詰めint32で渡され、
     //   ここで決まった形式への詰め直しはWriteFrames()内で行う。
@@ -148,6 +174,7 @@ AudioBackendResult WasapiExclusiveOutput::Initialize(const AudioFormat& format) 
     }
 
     if (FAILED(hr)) { m_lastHr = hr; return AudioBackendResult::ExclusiveModeUnavailable; }
+    } // if (m_shared) else
 
     // ★ 真実の源：初期化後に確定したバッファフレーム数を取得
     UINT32 confirmedBufferFrames = 0;
@@ -193,6 +220,24 @@ AudioBackendResult WasapiExclusiveOutput::Initialize(const AudioFormat& format) 
     return AudioBackendResult::Ok;
 }
 
+// ★ v10: 既定の出力デバイスの「既定の形式」（Windowsのサウンド設定→
+//   デバイスのプロパティ→詳細→既定の形式）のサンプルレートを返す。
+//   共有モードではこのレートで出せば、Windows側の周波数変換が起きない。
+uint32_t WasapiExclusiveOutput::QueryMixRate() {
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    ComPtr<IMMDevice> device;
+    ComPtr<IAudioClient> client;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                __uuidof(IMMDeviceEnumerator), &enumerator))) return 0;
+    if (FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device))) return 0;
+    if (FAILED(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &client))) return 0;
+    WAVEFORMATEX* mix = nullptr;
+    if (FAILED(client->GetMixFormat(&mix)) || !mix) return 0;
+    const uint32_t rate = mix->nSamplesPerSec;
+    CoTaskMemFree(mix);
+    return rate;
+}
+
 uint32_t WasapiExclusiveOutput::GetBufferSize() const { return m_bufferFrameCount; }
 AudioFormat WasapiExclusiveOutput::GetActualFormat() const { return m_actualFormat; }
 
@@ -230,7 +275,18 @@ AudioBackendResult WasapiExclusiveOutput::WriteFrames(const uint8_t* data, uint3
         }
     }
 
-    if (!(m_containerBits == 32 && m_validBits == 32)) {
+    if (m_float) {
+        // ★ v10: 共有モード。左詰めint32 → 32bit float（-1.0〜+1.0）
+        const size_t samples = static_cast<size_t>(frameCount) * m_waveFormat.Format.nChannels;
+        const size_t needed  = static_cast<size_t>(frameCount) * m_bytesPerFrame;
+        if (m_convBuf.size() < needed) m_convBuf.resize(needed);
+        const int32_t* in = reinterpret_cast<const int32_t*>(data);
+        float* o = reinterpret_cast<float*>(m_convBuf.data());
+        constexpr float kToFloat = 1.0f / 2147483648.0f;
+        for (size_t i = 0; i < samples; ++i)
+            o[i] = static_cast<float>(in[i]) * kToFloat;
+        data = m_convBuf.data();
+    } else if (!(m_containerBits == 32 && m_validBits == 32)) {
         const size_t samples = static_cast<size_t>(frameCount) * m_waveFormat.Format.nChannels;
         const size_t needed  = static_cast<size_t>(frameCount) * m_bytesPerFrame;
         if (m_convBuf.size() < needed) m_convBuf.resize(needed);
@@ -370,11 +426,24 @@ void WasapiExclusiveOutput::RenderThreadProc() {
             // 容量を超えた分は記録しない（カウンタだけは回るので後で気づける）。
         }
 
+        // ★ v10: 排他モードは毎回バッファ全体を渡す。共有モードは、Windowsの
+        //   ミキサーがまだ使い切っていない分(padding)を除いた空きだけを渡す。
+        UINT32 frames = m_bufferFrameCount;
+        if (m_shared) {
+            UINT32 padding = 0;
+            if (FAILED(m_audioClient->GetCurrentPadding(&padding))) {
+                NotifyError(AudioBackendResult::DeviceLost);
+                continue;
+            }
+            frames = (padding < m_bufferFrameCount) ? (m_bufferFrameCount - padding) : 0;
+            if (frames == 0) continue;
+        }
+
         BYTE* renderBuffer = nullptr;
-        HRESULT hr = m_renderClient->GetBuffer(m_bufferFrameCount, &renderBuffer);
+        HRESULT hr = m_renderClient->GetBuffer(frames, &renderBuffer);
         if (FAILED(hr)) { NotifyError(AudioBackendResult::DeviceLost); continue; }
 
-        size_t bufferByteCapacity = static_cast<size_t>(m_bufferFrameCount) * m_bytesPerFrame;
+        size_t bufferByteCapacity = static_cast<size_t>(frames) * m_bytesPerFrame;
 
         // ★ ここはRTスレッド。ミューテックスは一切取らない。
         size_t readIdx = m_readIndex.load(std::memory_order_relaxed);
@@ -421,7 +490,7 @@ void WasapiExclusiveOutput::RenderThreadProc() {
             }
         }
 
-        m_renderClient->ReleaseBuffer(m_bufferFrameCount, 0);
+        m_renderClient->ReleaseBuffer(frames, 0);
 
         // ★ ミューテックスを保持せずにnotify_oneを呼ぶ。
         if (toCopy > 0) {
@@ -454,6 +523,9 @@ void WasapiExclusiveOutput::Shutdown() {
 void WasapiExclusiveOutput::DumpDiagnostics() {
     // 呼び出し元(Stop())は非RTスレッドなので、ここでファイルI/Oをしても
     // オーディオのタイミングには影響しない。
+    // ★ v10: 配布版ではファイルを書かない（SetDiagnosticsPath()で出力先を
+    //   指定したときだけ書く。開発中の計測用）。
+    if (m_diagPath.empty()) return;
     uint64_t totalCallbacks = m_totalCallbacks.load(std::memory_order_relaxed);
     uint64_t underruns = m_underrunCount.load(std::memory_order_relaxed);
     size_t wakeCount = m_wakeTimestampCount.load(std::memory_order_relaxed);

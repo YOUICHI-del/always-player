@@ -27,7 +27,7 @@ public:
     AudioBackendResult Stop() override;
     void SetErrorCallback(ErrorCallback callback, void* userData) override;
     void Shutdown() override;
-    const char* GetBackendName() const override { return "WASAPI Exclusive"; }
+    const char* GetBackendName() const override { return m_shared ? "WASAPI Shared" : "WASAPI Exclusive"; }
 
     // ★ v10: 内部リングにまだ残っている（＝これから鳴る）フレーム数。
     //   曲の終端で「本当に鳴り終わったか」を判定するために使う。
@@ -37,6 +37,16 @@ public:
     // ★ v10: ビットパーフェクト手動指定用。次のInitialize()で優先して試す
     //   有効ビット数（16/24/32）。0なら自動（32→24→24in32→16の順）。
     void SetPreferredBits(int bits) { m_preferredBits = bits; }
+
+    // ★ v10: 共有モード（Bluetoothなど、排他モードを受け付けない機器用）。
+    //   trueにすると、次のInitialize()はWASAPI共有モードで開く。形式は
+    //   32bit float・ステレオ・指定レート。レートは呼び出し側がQueryMixRate()で
+    //   得たWindowsの「既定の形式」に合わせること（そうすればWindows側で
+    //   周波数変換は起きず、変換はAlways Engine自身のリサンプラーだけで済む）。
+    void SetSharedMode(bool shared) { m_shared = shared; }
+    bool IsSharedMode() const { return m_shared; }
+    // 既定の出力デバイスの「既定の形式」のサンプルレート（取得失敗時は0）。
+    uint32_t QueryMixRate();
     long GetLastHr() const { return m_lastHr; }
     // v10診断用：合意したコンテナ幅／有効ビット数
     uint16_t GetContainerBits() const { return m_containerBits; }
@@ -121,6 +131,8 @@ private:
     long long m_defaultPeriod = 0;
     long long m_minPeriod = 0;
     std::vector<uint8_t> m_convBuf;
+    bool m_shared = false;   // v10: 共有モードで開いているか（次回Initialize時の指定も兼ねる）
+    bool m_float  = false;   // v10: デバイスへ渡す形式が32bit floatか（共有モード時）
 
     // v10: VUメーター用レベルFIFO（単一生産者＝WriteFrames、単一消費者＝RTスレッド）
     struct LevelEntry { uint64_t endByte; float l; float r; };

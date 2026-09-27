@@ -36,8 +36,9 @@ const QStringList Player::SUPPORTED_EXT = {
 //   ("aif"はAIFFの別拡張子表記。"wv"はWavPack)
 //   v10: "mp3"/"m4a"/"aac" はWindows Media Foundation(MfPcmDecoder)で追加
 //        "ogg"(Vorbis/Opus) は stb_vorbis／libopusfile、"opus" は libopusfile で追加
+//        "dsf"/"dff" は DsdPcmDecoder（DSD→PCM 176.4k/192k 変換）で追加
 const QStringList Player::NEW_ENGINE_EXT = {
-    "flac", "wav", "aiff", "aif", "wv", "mp3", "m4a", "aac", "ogg", "opus"
+    "flac", "wav", "aiff", "aif", "wv", "mp3", "m4a", "aac", "ogg", "opus", "dsf", "dff"
 };
 
 Player::Player(QObject *parent) : QObject(parent) {}

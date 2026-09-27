@@ -73,6 +73,8 @@ add_executable(Always WIN32
     engine/stb_vorbis.c
     engine/OpusPcmDecoder.h
     engine/OpusPcmDecoder.cpp
+    engine/DsdPcmDecoder.h
+    engine/DsdPcmDecoder.cpp
     engine/PcmDualEngine.h
     engine/PcmDualEngine.cpp
     engine/SincResampler.h

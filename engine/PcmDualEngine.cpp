@@ -6,6 +6,7 @@
 #include "MfPcmDecoder.h"
 #include "OggVorbisPcmDecoder.h"
 #include "OpusPcmDecoder.h"
+#include "DsdPcmDecoder.h"
 #include <vector>
 #include <chrono>
 #include <cstdio>
@@ -45,6 +46,8 @@ static std::unique_ptr<IPcmDecoder> OpenDecoderFor(const std::wstring& filePath,
     if (extLower == "mp3" || extLower == "m4a" || extLower == "aac")
                                                      return tryOpen(std::make_unique<MfPcmDecoder>());
     if (extLower == "opus")                          return tryOpen(std::make_unique<OpusPcmDecoder>());
+    // DSD(DSF/DFF)はPCM(176.4k/192k)へ変換して出力
+    if (extLower == "dsf" || extLower == "dff")      return tryOpen(std::make_unique<DsdPcmDecoder>());
     if (extLower == "ogg") {
         if (auto d = tryOpen(std::make_unique<OggVorbisPcmDecoder>())) return d;
         return tryOpen(std::make_unique<OpusPcmDecoder>());

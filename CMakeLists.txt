@@ -68,6 +68,11 @@ add_executable(Always WIN32
     engine/WavPackPcmDecoder.cpp
     engine/MfPcmDecoder.h
     engine/MfPcmDecoder.cpp
+    engine/OggVorbisPcmDecoder.h
+    engine/OggVorbisPcmDecoder.cpp
+    engine/stb_vorbis.c
+    engine/OpusPcmDecoder.h
+    engine/OpusPcmDecoder.cpp
     engine/PcmDualEngine.h
     engine/PcmDualEngine.cpp
     engine/SincResampler.h
@@ -105,6 +110,8 @@ target_include_directories(Always PRIVATE
     engine
     engine/wavpack
     C:/vcpkg/installed/x64-windows/include
+    C:/vcpkg/installed/x64-windows-static-md/include/opus
+    C:/vcpkg/installed/x64-windows-static-md/include
 )
 find_package(Qt6 REQUIRED COMPONENTS Concurrent)
 target_link_libraries(Always PRIVATE
@@ -119,6 +126,10 @@ target_link_libraries(Always PRIVATE
     winmm.lib
     mmdevapi.lib
     avrt.lib
+    # v10: Opus（vcpkgの静的ライブラリ x64-windows-static-md。DLL不要）
+    C:/vcpkg/installed/x64-windows-static-md/lib/opusfile.lib
+    C:/vcpkg/installed/x64-windows-static-md/lib/opus.lib
+    C:/vcpkg/installed/x64-windows-static-md/lib/ogg.lib
     mfplat.lib
     mfreadwrite.lib
     mfuuid.lib

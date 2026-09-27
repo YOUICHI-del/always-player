@@ -4,6 +4,8 @@
 #include "AiffPcmDecoder.h"
 #include "WavPackPcmDecoder.h"
 #include "MfPcmDecoder.h"
+#include "OggVorbisPcmDecoder.h"
+#include "OpusPcmDecoder.h"
 #include <vector>
 #include <chrono>
 #include <cstdio>
@@ -26,31 +28,38 @@ namespace {
     }
 }
 
+// ★ v10: 拡張子に応じたデコーダーを作って開く（通常再生とギャップレス先読みで共用）。
+//   開けなければnullptr（呼び出し側でmpv経路／通常の再オープンにフォールバック）。
+//   ".ogg"は中身がVorbisとOpusの両方ありうるので、Vorbis→Opusの順に試す。
+static std::unique_ptr<IPcmDecoder> OpenDecoderFor(const std::wstring& filePath, const std::string& extLower)
+{
+    auto tryOpen = [&](std::unique_ptr<IPcmDecoder> d) -> std::unique_ptr<IPcmDecoder> {
+        if (d && d->Open(filePath)) return d;
+        return nullptr;
+    };
+    if (extLower == "flac")                          return tryOpen(std::make_unique<FlacPcmDecoder>());
+    if (extLower == "wav")                           return tryOpen(std::make_unique<WavPcmDecoder>());
+    if (extLower == "aiff" || extLower == "aif")     return tryOpen(std::make_unique<AiffPcmDecoder>());
+    if (extLower == "wv")                            return tryOpen(std::make_unique<WavPackPcmDecoder>());
+    // MP3/AAC/M4A(ALAC含む)はWindows Media Foundationでデコード
+    if (extLower == "mp3" || extLower == "m4a" || extLower == "aac")
+                                                     return tryOpen(std::make_unique<MfPcmDecoder>());
+    if (extLower == "opus")                          return tryOpen(std::make_unique<OpusPcmDecoder>());
+    if (extLower == "ogg") {
+        if (auto d = tryOpen(std::make_unique<OggVorbisPcmDecoder>())) return d;
+        return tryOpen(std::make_unique<OpusPcmDecoder>());
+    }
+    return nullptr; // 未対応フォーマット
+}
+
 PcmDualEngine::PcmDualEngine() = default;
 PcmDualEngine::~PcmDualEngine() { Close(); }
 
 bool PcmDualEngine::Open(const std::wstring& filePath, const std::string& extLower) {
     Close();
 
-    if (extLower == "flac") {
-        m_decoder = std::make_unique<FlacPcmDecoder>();
-    } else if (extLower == "wav") {
-        m_decoder = std::make_unique<WavPcmDecoder>();
-    } else if (extLower == "aiff" || extLower == "aif") {
-        m_decoder = std::make_unique<AiffPcmDecoder>();
-    } else if (extLower == "wv") {
-        m_decoder = std::make_unique<WavPackPcmDecoder>();
-    } else if (extLower == "mp3" || extLower == "m4a" || extLower == "aac") {
-        // v10: MP3/AAC/M4A(ALAC含む)はWindows Media Foundationでデコード
-        m_decoder = std::make_unique<MfPcmDecoder>();
-    } else {
-        return false; // 未対応フォーマット。呼び出し側でmpv経路にフォールバック
-    }
-
-    if (!m_decoder->Open(filePath)) {
-        m_decoder.reset();
-        return false;
-    }
+    m_decoder = OpenDecoderFor(filePath, extLower);
+    if (!m_decoder) return false; // 未対応・開けない場合は呼び出し側でmpv経路にフォールバック
 
     m_nativeSampleRate = m_decoder->GetSampleRate();
     m_outputSampleRate = m_nativeSampleRate; // SetTargetSampleRate()未呼び出しならネイティブのまま
@@ -146,22 +155,8 @@ bool PcmDualEngine::Seek(double seconds) {
 PcmDualEngine::GaplessInfo PcmDualEngine::PrepareGaplessNext(const std::wstring& filePath, const std::string& extLower) {
     GaplessInfo info;
 
-    std::unique_ptr<IPcmDecoder> dec;
-    if (extLower == "flac") {
-        dec = std::make_unique<FlacPcmDecoder>();
-    } else if (extLower == "wav") {
-        dec = std::make_unique<WavPcmDecoder>();
-    } else if (extLower == "aiff" || extLower == "aif") {
-        dec = std::make_unique<AiffPcmDecoder>();
-    } else if (extLower == "wv") {
-        dec = std::make_unique<WavPackPcmDecoder>();
-    } else if (extLower == "mp3" || extLower == "m4a" || extLower == "aac") {
-        dec = std::make_unique<MfPcmDecoder>();
-    } else {
-        return info; // 未対応フォーマット。呼び出し側で通常の再オープンにフォールバック
-    }
-
-    if (!dec->Open(filePath)) return info;
+    std::unique_ptr<IPcmDecoder> dec = OpenDecoderFor(filePath, extLower);
+    if (!dec) return info; // 未対応・開けない場合は通常の再オープンにフォールバック
     if (dec->GetChannels() != 2) { dec->Close(); return info; }
 
     info.ok               = true;

@@ -35,8 +35,9 @@ const QStringList Player::SUPPORTED_EXT = {
 //   ここに無いフォーマットは常にmpv経路で再生される。
 //   ("aif"はAIFFの別拡張子表記。"wv"はWavPack)
 //   v10: "mp3"/"m4a"/"aac" はWindows Media Foundation(MfPcmDecoder)で追加
+//        "ogg"(Vorbis/Opus) は stb_vorbis／libopusfile、"opus" は libopusfile で追加
 const QStringList Player::NEW_ENGINE_EXT = {
-    "flac", "wav", "aiff", "aif", "wv", "mp3", "m4a", "aac"
+    "flac", "wav", "aiff", "aif", "wv", "mp3", "m4a", "aac", "ogg", "opus"
 };
 
 Player::Player(QObject *parent) : QObject(parent) {}

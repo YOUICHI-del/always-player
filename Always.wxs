@@ -57,40 +57,40 @@
 
   <Fragment>
     <ComponentGroup Id="AlwaysFiles" Directory="INSTALLFOLDER">
-      <Component Id="cmp_Always_exe" Guid="{4C6DE3CA-8A5C-48CE-9647-349BC828DFD3}" Win64="yes">
+      <Component Id="cmp_Always_exe" Guid="{32CA34AF-650D-4402-A0D1-B991FBD3EA43}" Win64="yes">
         <File Id="fil_Always_exe" KeyPath="yes" Source="$(var.SourceDir)\Always.exe" />
       </Component>
-      <Component Id="cmp_tag_dll" Guid="{9678ED11-20CE-4BBD-8CDB-8008EEBF1617}" Win64="yes">
+      <Component Id="cmp_tag_dll" Guid="{82EB11C9-45CB-4613-AB22-988BD7DC937C}" Win64="yes">
         <File Id="fil_tag_dll" KeyPath="yes" Source="$(var.SourceDir)\tag.dll" />
       </Component>
-      <Component Id="cmp_zlib1_dll" Guid="{F1FFB8B9-FFCC-4547-B0E0-FC26657F7B1F}" Win64="yes">
+      <Component Id="cmp_zlib1_dll" Guid="{F8BF2C69-6B79-4FA2-BD3A-8EBBB6DDCB05}" Win64="yes">
         <File Id="fil_zlib1_dll" KeyPath="yes" Source="$(var.SourceDir)\zlib1.dll" />
       </Component>
-      <Component Id="cmp_Qt6Core" Guid="{C638E0FA-71D0-4061-86A8-32FCA4A8A1AC}" Win64="yes">
+      <Component Id="cmp_Qt6Core" Guid="{D5688D83-48C5-4485-82ED-03F004762D6C}" Win64="yes">
         <File Id="fil_Qt6Core" KeyPath="yes" Source="$(var.SourceDir)\Qt6Core.dll" />
       </Component>
-      <Component Id="cmp_Qt6Gui" Guid="{7AE3C13A-69FC-4A4D-BD19-FB640550ECC0}" Win64="yes">
+      <Component Id="cmp_Qt6Gui" Guid="{E6456B9B-F369-4B3C-A8FE-135E7B38E5E3}" Win64="yes">
         <File Id="fil_Qt6Gui" KeyPath="yes" Source="$(var.SourceDir)\Qt6Gui.dll" />
       </Component>
-      <Component Id="cmp_Qt6Widgets" Guid="{1FFBCC3B-D883-466C-9DFB-EE938649FBF1}" Win64="yes">
+      <Component Id="cmp_Qt6Widgets" Guid="{E0E72E64-5199-4DD5-A2D9-4401D8B5CA4C}" Win64="yes">
         <File Id="fil_Qt6Widgets" KeyPath="yes" Source="$(var.SourceDir)\Qt6Widgets.dll" />
       </Component>
-      <Component Id="cmp_Qt6Network" Guid="{B57E854A-FD8C-4B08-8D01-F8C4607821C1}" Win64="yes">
+      <Component Id="cmp_Qt6Network" Guid="{C16608C2-E9D9-4573-A88A-2E3BC6C90CAE}" Win64="yes">
         <File Id="fil_Qt6Network" KeyPath="yes" Source="$(var.SourceDir)\Qt6Network.dll" />
       </Component>
-      <Component Id="cmp_Qt6Concurrent" Guid="{5E3B7C21-9A4D-4F6E-8B1C-2D7A9E4F6C30}" Win64="yes">
+      <Component Id="cmp_Qt6Concurrent" Guid="{4FAB014C-25AD-4576-85E4-54F830C4C086}" Win64="yes">
         <File Id="fil_Qt6Concurrent" KeyPath="yes" Source="$(var.SourceDir)\Qt6Concurrent.dll" />
       </Component>
-      <Component Id="cmp_Qt6Svg" Guid="{2769CAA1-2A3A-4CC6-9895-E1AF5FCA175E}" Win64="yes">
+      <Component Id="cmp_Qt6Svg" Guid="{8AD1C688-518C-4A2E-AB52-6D1F7DF94C7A}" Win64="yes">
         <File Id="fil_Qt6Svg" KeyPath="yes" Source="$(var.SourceDir)\Qt6Svg.dll" />
       </Component>
-      <Component Id="cmp_msvcp140" Guid="{A1234567-0001-0001-0001-000000000001}" Win64="yes">
+      <Component Id="cmp_msvcp140" Guid="{50F41C68-5BBC-486B-B087-B3BB376DC2A9}" Win64="yes">
         <File Id="fil_msvcp140" KeyPath="yes" Source="$(var.SourceDir)\MSVCP140.dll" />
       </Component>
-      <Component Id="cmp_vcruntime140" Guid="{A1234567-0001-0001-0001-000000000002}" Win64="yes">
+      <Component Id="cmp_vcruntime140" Guid="{0EB3F111-3DA8-47BF-8CB8-4B973C1C03F7}" Win64="yes">
         <File Id="fil_vcruntime140" KeyPath="yes" Source="$(var.SourceDir)\VCRUNTIME140.dll" />
       </Component>
-      <Component Id="cmp_vcruntime140_1" Guid="{A1234567-0001-0001-0001-000000000003}" Win64="yes">
+      <Component Id="cmp_vcruntime140_1" Guid="{E8D9C4BE-611C-49CC-AB85-F637F38C35F3}" Win64="yes">
         <File Id="fil_vcruntime140_1" KeyPath="yes" Source="$(var.SourceDir)\VCRUNTIME140_1.dll" />
       </Component>
     </ComponentGroup>
@@ -98,7 +98,7 @@
 
   <Fragment>
     <ComponentGroup Id="PlatformsFiles" Directory="DIR_platforms">
-      <Component Id="cmp_qwindows" Guid="{75610066-4812-4430-AF32-89396A92552C}" Win64="yes">
+      <Component Id="cmp_qwindows" Guid="{E83B48C2-DB35-4738-BD1D-CCE7E0FC3618}" Win64="yes">
         <File Id="fil_qwindows" KeyPath="yes" Source="$(var.SourceDir)\platforms\qwindows.dll" />
       </Component>
     </ComponentGroup>
@@ -106,7 +106,7 @@
 
   <Fragment>
     <ComponentGroup Id="StylesFiles" Directory="DIR_styles">
-      <Component Id="cmp_qstyle" Guid="{4FF3F775-6580-455A-83C4-0C487D3E0F6C}" Win64="yes">
+      <Component Id="cmp_qstyle" Guid="{238EC97A-8A90-4499-9662-E7A0AC77475E}" Win64="yes">
         <File Id="fil_qstyle" KeyPath="yes" Source="$(var.SourceDir)\styles\qmodernwindowsstyle.dll" />
       </Component>
     </ComponentGroup>
@@ -114,16 +114,16 @@
 
   <Fragment>
     <ComponentGroup Id="ImageFormatsFiles" Directory="DIR_imageformats">
-      <Component Id="cmp_qsvg" Guid="{3F82EF02-9F0B-471B-9D0C-15AEC4683194}" Win64="yes">
+      <Component Id="cmp_qsvg" Guid="{DFA7661C-EC6D-4907-B4EE-CF354E0B491D}" Win64="yes">
         <File Id="fil_qsvg" KeyPath="yes" Source="$(var.SourceDir)\imageformats\qsvg.dll" />
       </Component>
-      <Component Id="cmp_qico" Guid="{4C624229-8AA9-4E14-AE31-7CA36A5A9AFB}" Win64="yes">
+      <Component Id="cmp_qico" Guid="{35F048EF-F038-4DDC-87A7-21D2547D9A8D}" Win64="yes">
         <File Id="fil_qico" KeyPath="yes" Source="$(var.SourceDir)\imageformats\qico.dll" />
       </Component>
-      <Component Id="cmp_qjpeg" Guid="{2DD256BD-DC9B-4E0B-9004-1F749BBA2904}" Win64="yes">
+      <Component Id="cmp_qjpeg" Guid="{4486CECC-E39B-46C2-8964-6203E18F7B6C}" Win64="yes">
         <File Id="fil_qjpeg" KeyPath="yes" Source="$(var.SourceDir)\imageformats\qjpeg.dll" />
       </Component>
-      <Component Id="cmp_qgif" Guid="{2B45D44D-EB74-4F7F-9DE0-8A605349EE6F}" Win64="yes">
+      <Component Id="cmp_qgif" Guid="{9617DC3E-09C4-4952-BC48-CF13A019A1FF}" Win64="yes">
         <File Id="fil_qgif" KeyPath="yes" Source="$(var.SourceDir)\imageformats\qgif.dll" />
       </Component>
     </ComponentGroup>
@@ -131,7 +131,7 @@
 
   <Fragment>
     <ComponentGroup Id="IconEnginesFiles" Directory="DIR_iconengines">
-      <Component Id="cmp_qsvgicon" Guid="{8FA5942E-13FA-4118-BC16-ACD46CA3365F}" Win64="yes">
+      <Component Id="cmp_qsvgicon" Guid="{E8615DA5-C5CB-455C-B602-4EAA90730DBB}" Win64="yes">
         <File Id="fil_qsvgicon" KeyPath="yes" Source="$(var.SourceDir)\iconengines\qsvgicon.dll" />
       </Component>
     </ComponentGroup>
@@ -139,7 +139,7 @@
 
   <Fragment>
     <ComponentGroup Id="NetworkInfoFiles" Directory="DIR_networkinformation">
-      <Component Id="cmp_qnetwork" Guid="{F1DF7F05-B280-4644-AF14-C9747B097044}" Win64="yes">
+      <Component Id="cmp_qnetwork" Guid="{E01C2838-4259-431D-82D7-D649048FE231}" Win64="yes">
         <File Id="fil_qnetwork" KeyPath="yes" Source="$(var.SourceDir)\networkinformation\qnetworklistmanager.dll" />
       </Component>
     </ComponentGroup>
@@ -147,7 +147,7 @@
 
   <Fragment>
     <ComponentGroup Id="TlsFiles" Directory="DIR_tls">
-      <Component Id="cmp_qtls" Guid="{B9526FBD-D490-40A1-9272-FF22F47551E4}" Win64="yes">
+      <Component Id="cmp_qtls" Guid="{944D1607-D6F6-4953-A319-1FFA3430A3AF}" Win64="yes">
         <File Id="fil_qtls" KeyPath="yes" Source="$(var.SourceDir)\tls\qschannelbackend.dll" />
       </Component>
     </ComponentGroup>
@@ -155,14 +155,14 @@
 
   <Fragment>
     <ComponentGroup Id="GenericFiles" Directory="DIR_generic">
-      <Component Id="cmp_qtouch" Guid="{68388402-BF68-4C4D-BBCB-812748ABCF37}" Win64="yes">
+      <Component Id="cmp_qtouch" Guid="{1413F0A9-AB51-40E9-A5F1-0F934FA6C504}" Win64="yes">
         <File Id="fil_qtouch" KeyPath="yes" Source="$(var.SourceDir)\generic\qtuiotouchplugin.dll" />
       </Component>
     </ComponentGroup>
   </Fragment>
 
   <Fragment>
-    <Component Id="AlwaysShortcut" Guid="{A0B08527-EC2C-4607-B2D7-F271F295647A}" Directory="AlwaysProgramMenu" Win64="yes">
+    <Component Id="AlwaysShortcut" Guid="{B00A9FB4-3399-4198-A1F9-661C3A7F4A4B}" Directory="AlwaysProgramMenu" Win64="yes">
       <Shortcut Id="StartMenuShortcut"
                 Name="Always Player"
                 Target="[INSTALLFOLDER]Always.exe"
@@ -173,7 +173,7 @@
   </Fragment>
 
   <Fragment>
-    <Component Id="DesktopShortcut" Guid="{490FD831-4999-4593-B670-D50F42AC7434}" Directory="DesktopFolder" Win64="yes">
+    <Component Id="DesktopShortcut" Guid="{70512B6E-D442-43E1-A6F0-21FB4D331723}" Directory="DesktopFolder" Win64="yes">
       <Shortcut Id="DesktopShortcutLink"
                 Name="Always Player"
                 Target="[INSTALLFOLDER]Always.exe"

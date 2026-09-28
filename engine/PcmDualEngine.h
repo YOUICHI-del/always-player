@@ -58,6 +58,11 @@ public:
     bool Open(const std::wstring& filePath, const std::string& extLower);
     void Close();
 
+    // ★ v10: 次のOpen()でDSF/DFFをDoPの形で開くか（それ以外の形式には影響しない）。
+    void SetDopMode(bool on) { m_dopMode = on; }
+    // 今開いている曲がDoPで出力中か
+    bool IsDop() const { return m_isDop; }
+
     void AttachOutputBackend(IAudioOutputBackend* backend);
 
     // ★ アップサンプリング先のレートを指定する。Open()成功後、
@@ -111,6 +116,8 @@ private:
     void DecodeThreadProc();
 
     std::unique_ptr<IPcmDecoder> m_decoder;
+    bool     m_dopMode = false;   // v10: 次のOpen()でDSDをDoPで開くか
+    bool     m_isDop   = false;   // v10: 今の曲がDoPか
     uint32_t m_nativeSampleRate = 0;
     uint32_t m_outputSampleRate = 0;
     uint32_t m_channels = 0;

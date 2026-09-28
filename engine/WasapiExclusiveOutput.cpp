@@ -114,8 +114,10 @@ AudioBackendResult WasapiExclusiveOutput::Initialize(const AudioFormat& format) 
     //   優先順：32bit(32有効) → 24bit詰め(3byte) → 24bit有効/32bitコンテナ → 16bit
     struct Candidate { uint16_t container; uint16_t valid; };
     std::vector<Candidate> candidates = { {32, 32}, {24, 24}, {32, 24}, {16, 16} };
+    // ★ v10: DoPは24bitが標準。16bitではマーカーが欠けてノイズになるので候補から外す。
+    if (m_dop) candidates = { {24, 24}, {32, 24}, {32, 32} };
     // ★ v10: 手動指定のビット数があれば、その形式を先頭に並べ替えて優先する
-    if (m_preferredBits == 16 || m_preferredBits == 24 || m_preferredBits == 32) {
+    else if (m_preferredBits == 16 || m_preferredBits == 24 || m_preferredBits == 32) {
         std::stable_sort(candidates.begin(), candidates.end(),
             [this](const Candidate &a, const Candidate &b) {
                 return (a.valid == m_preferredBits) > (b.valid == m_preferredBits);
@@ -265,7 +267,7 @@ AudioBackendResult WasapiExclusiveOutput::WriteFrames(const uint8_t* data, uint3
         const uint32_t ch = m_waveFormat.Format.nChannels;
         double sumL = 0.0, sumR = 0.0;
         constexpr double kS = 1.0 / 2147483648.0;
-        for (uint32_t f = 0; f < frameCount; ++f) {
+        for (uint32_t f = 0; f < frameCount && !m_dop; ++f) {   // v10: DoP中は計測しない（針は0）
             const double l = in[f * ch] * kS;
             const double r = (ch >= 2) ? in[f * ch + 1] * kS : l;
             sumL += l * l;

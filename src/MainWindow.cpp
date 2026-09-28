@@ -963,7 +963,30 @@ void MainWindow::setupUI()
     }
     bpGroup->setExclusive(true);
 
+    // ★ v10: DoP出力（初期OFF）。レート選択のグループとは独立したON/OFF項目。
+    bpMenu->addSeparator();
+    m_dopAct = bpMenu->addAction(QString::fromUtf8("DoP出力（DSD対応DACのみ）"));
+    m_dopAct->setCheckable(true);
+    m_dopAct->setChecked(false);
+    m_dopAct->setToolTip(QString::fromUtf8(
+        "DSF/DFFをDSDのままDACへ送ります。DSD非対応のDACでは大きなノイズになるので、"
+        "対応DACのときだけONにしてください。DoP中は音量スライダーは効きません（DAC側で調整）。"));
+
     connect(bpMenu, &QMenu::triggered, this, [this](QAction *act) {
+        // ★ v10: DoP項目はレート選択ではない（dataを持たないので下の処理に進ませない）
+        if (act == m_dopAct) {
+            const bool on = m_dopAct->isChecked();
+            if (on) {
+                QMessageBox::warning(this, QStringLiteral("Always Player"),
+                    QString::fromUtf8("DoP出力をONにしました。\n\n"
+                        "DSD非対応のDACでは「サー」という大きなノイズになります。\n"
+                        "最初はDAC・アンプの音量を下げてから再生してください。\n"
+                        "DoP中は音量スライダーは効きません（DAC側で調整してください）。"));
+            }
+            m_player->setDopEnabled(on);
+            scheduleSave();
+            return;
+        }
         if (act == m_bpActOff) {
             m_bpManualOff = true;   // ★ 手動OFFを記憶
             m_bpManualRatePinned = false;  // ★ OFFにしたので固定レートも解除
@@ -2494,6 +2517,7 @@ void MainWindow::saveFavorites()
     m_savedPowerPlanSnapshot  = m_savedPowerPlan;
     m_favListsSnapshot        = m_favoriteLists;
     m_activeListIndexSnapshot = m_activeListIndex;
+    m_dopSnapshot             = m_dopAct && m_dopAct->isChecked();
 
     bool bpOn = !m_bpActOff->isChecked();
     int  bpRate = 0, bpBits = 0;
@@ -2532,6 +2556,7 @@ void MainWindow::scheduleSave()
             m_savedPowerPlanSnapshot  = m_savedPowerPlan;
             m_favListsSnapshot        = m_favoriteLists;
             m_activeListIndexSnapshot = m_activeListIndex;
+            m_dopSnapshot             = m_dopAct && m_dopAct->isChecked();
 
             QString sfSnapshot = m_soundField;
             bool   bpOn   = !m_bpActOff->isChecked();
@@ -2609,6 +2634,7 @@ void MainWindow::writeFavoritesToDisk(const QMap<QString, QString> &favorites,
             out << "plan=" << m_savedPowerPlanSnapshot << "\n";
         out << "[bitperfect]\n";
         out << "enabled=" << (bpOn ? "1" : "0") << "\n";
+        out << "dop=" << (m_dopSnapshot ? "1" : "0") << "\n";   // v10
         if (bpOn && bpRate > 0) {
             out << "rate=" << bpRate << "\n";
             out << "bits=" << bpBits << "\n";
@@ -2718,6 +2744,11 @@ void MainWindow::loadFavorites()
             bpRate = line.mid(5).toInt();
         if (inBp && line.startsWith("bits="))
             bpBits = line.mid(5).toInt();
+        if (inBp && line.startsWith("dop=")) {   // v10: DoP出力の設定
+            const bool dopOn = (line.mid(4) == "1");
+            if (m_dopAct) m_dopAct->setChecked(dopOn);
+            m_player->setDopEnabled(dopOn);
+        }
         if (inPower && line.startsWith("plan=")) {
             savedPowerPlan = line.mid(5).trimmed();
             m_savedPowerPlan = savedPowerPlan;

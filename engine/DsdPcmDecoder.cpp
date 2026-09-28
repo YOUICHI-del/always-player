@@ -119,6 +119,18 @@ bool DsdPcmDecoder::Open(const std::wstring& filePath) {
         return false;
     }
 
+    // ★ v10: DoPモード。DSD 16bit(1チャンネルあたり2バイト)で1フレーム。
+    //   フィルタは使わない（DSDのビット列をそのままDACへ届ける）。
+    if (m_dop) {
+        if (m_dsdRate % 16 != 0) { Close(); return false; }
+        m_outRate     = m_dsdRate / 16;      // DSD64→176400、DSD128→352800、DSD256→705600
+        m_totalFrames = m_bytesPerCh / 2;
+        m_dopMarker   = 0x05;
+        SeekToByte(0);
+        m_skipFrames = 0;
+        return true;
+    }
+
     // 出力レート：44.1k系→176.4kHz、48k系→192kHz
     if (m_dsdRate % 44100 == 0)      m_outRate = 176400;
     else if (m_dsdRate % 48000 == 0) m_outRate = 192000;
@@ -302,8 +314,39 @@ size_t DsdPcmDecoder::ReadDsdBytes(size_t n) {
     return got;
 }
 
+// ★ v10: DoP（DSD over PCM）。各フレーム＝[マーカー8bit][古いDSDバイト][新しいDSDバイト]の
+//   24bitを、左詰めint32（下位8bitは0）で返す。WASAPI出力側の24bit詰め／24in32／32bit
+//   いずれでも、上位24bitがそのままDACへ届く。マーカーは両チャンネル同じ値で、
+//   フレームごとに0x05と0xFAを交互に切り替える（DACはこれを見てDSDと判定する）。
+uint64_t DsdPcmDecoder::ReadFramesDop(int32_t* out, uint64_t frameCount) {
+    uint64_t produced = 0;
+    while (produced < frameCount) {
+        uint64_t needBytes = (frameCount - produced) * 2;
+        if (needBytes > 65536) needBytes = 65536;
+        const uint64_t posBefore = m_bytePos;
+        const size_t got = ReadDsdBytes(static_cast<size_t>(needBytes));
+        const size_t frames = got / 2;
+        if (got % 2) m_bytePos = posBefore + frames * 2;   // 端数の1バイトは次回に回す
+        if (frames == 0) break;                             // EOF
+        for (size_t f = 0; f < frames; ++f) {
+            const uint32_t marker = m_dopMarker;
+            m_dopMarker = static_cast<uint8_t>(m_dopMarker ^ 0xFF);   // 0x05 <-> 0xFA
+            for (int c = 0; c < 2; ++c) {
+                const uint32_t src = (m_channels == 1) ? 0u : static_cast<uint32_t>(c);
+                const uint32_t w = (marker << 24)
+                                 | (static_cast<uint32_t>(m_chBytes[src][f * 2])     << 16)
+                                 | (static_cast<uint32_t>(m_chBytes[src][f * 2 + 1]) << 8);
+                out[(produced + f) * 2 + c] = static_cast<int32_t>(w);
+            }
+        }
+        produced += frames;
+    }
+    return produced;
+}
+
 uint64_t DsdPcmDecoder::ReadFrames(int32_t* out, uint64_t frameCount) {
     if (!m_fp || frameCount == 0) return 0;
+    if (m_dop) return ReadFramesDop(out, frameCount);
 
     const size_t nB = m_hB.size();
     uint64_t produced = 0;
@@ -359,6 +402,11 @@ uint64_t DsdPcmDecoder::ReadFrames(int32_t* out, uint64_t frameCount) {
 bool DsdPcmDecoder::SeekToFrame(uint64_t frame) {
     if (!m_fp) return false;
     if (frame > m_totalFrames) frame = m_totalFrames;
+    if (m_dop) {                      // v10: DoPはバイト位置へ直接移動するだけ
+        SeekToByte(frame * 2);
+        m_skipFrames = 0;
+        return true;
+    }
     // 段A(12バイト)と段Bの履歴を満たすだけ手前から読み直し、目的の位置まで
     // 出力を読み捨てる（連続再生時と1サンプルも違わない値になる）。
     const uint64_t target  = frame * m_M;

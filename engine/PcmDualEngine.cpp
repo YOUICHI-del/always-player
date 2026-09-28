@@ -32,7 +32,8 @@ namespace {
 // ★ v10: 拡張子に応じたデコーダーを作って開く（通常再生とギャップレス先読みで共用）。
 //   開けなければnullptr（呼び出し側でmpv経路／通常の再オープンにフォールバック）。
 //   ".ogg"は中身がVorbisとOpusの両方ありうるので、Vorbis→Opusの順に試す。
-static std::unique_ptr<IPcmDecoder> OpenDecoderFor(const std::wstring& filePath, const std::string& extLower)
+static std::unique_ptr<IPcmDecoder> OpenDecoderFor(const std::wstring& filePath, const std::string& extLower,
+                                                   bool dop = false)
 {
     auto tryOpen = [&](std::unique_ptr<IPcmDecoder> d) -> std::unique_ptr<IPcmDecoder> {
         if (d && d->Open(filePath)) return d;
@@ -47,7 +48,7 @@ static std::unique_ptr<IPcmDecoder> OpenDecoderFor(const std::wstring& filePath,
                                                      return tryOpen(std::make_unique<MfPcmDecoder>());
     if (extLower == "opus")                          return tryOpen(std::make_unique<OpusPcmDecoder>());
     // DSD(DSF/DFF)はPCM(176.4k/192k)へ変換して出力
-    if (extLower == "dsf" || extLower == "dff")      return tryOpen(std::make_unique<DsdPcmDecoder>());
+    if (extLower == "dsf" || extLower == "dff")      return tryOpen(std::make_unique<DsdPcmDecoder>(dop));
     if (extLower == "ogg") {
         if (auto d = tryOpen(std::make_unique<OggVorbisPcmDecoder>())) return d;
         return tryOpen(std::make_unique<OpusPcmDecoder>());
@@ -61,8 +62,10 @@ PcmDualEngine::~PcmDualEngine() { Close(); }
 bool PcmDualEngine::Open(const std::wstring& filePath, const std::string& extLower) {
     Close();
 
-    m_decoder = OpenDecoderFor(filePath, extLower);
-    if (!m_decoder) return false; // 未対応・開けない場合は呼び出し側でmpv経路にフォールバック
+    m_isDop = false;
+    m_decoder = OpenDecoderFor(filePath, extLower, m_dopMode);
+    if (!m_decoder) return false;
+    if (auto* dsd = dynamic_cast<DsdPcmDecoder*>(m_decoder.get())) m_isDop = dsd->IsDop(); // 未対応・開けない場合は呼び出し側でmpv経路にフォールバック
 
     m_nativeSampleRate = m_decoder->GetSampleRate();
     m_outputSampleRate = m_nativeSampleRate; // SetTargetSampleRate()未呼び出しならネイティブのまま
@@ -110,6 +113,7 @@ void PcmDualEngine::Close() {
     StopDecoding();
     CancelGapless();
     if (m_decoder) { m_decoder->Close(); m_decoder.reset(); }
+    m_isDop = false;
     if (m_ring) m_ring->Clear();
     m_nativeSampleRate = m_outputSampleRate = m_channels = m_bitsPerSample = 0;
     m_totalFrames = 0;
@@ -158,7 +162,8 @@ bool PcmDualEngine::Seek(double seconds) {
 PcmDualEngine::GaplessInfo PcmDualEngine::PrepareGaplessNext(const std::wstring& filePath, const std::string& extLower) {
     GaplessInfo info;
 
-    std::unique_ptr<IPcmDecoder> dec = OpenDecoderFor(filePath, extLower);
+    // ★ v10: ギャップレス先読みでは常にPCMとして開く（DoPの曲はギャップレス対象外。Player側で除外）
+    std::unique_ptr<IPcmDecoder> dec = OpenDecoderFor(filePath, extLower, false);
     if (!dec) return info; // 未対応・開けない場合は通常の再オープンにフォールバック
     if (dec->GetChannels() != 2) { dec->Close(); return info; }
 

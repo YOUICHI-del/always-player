@@ -31,7 +31,13 @@
 // ─────────────────────────────────────────────────────────
 class DsdPcmDecoder : public IPcmDecoder {
 public:
-    DsdPcmDecoder() = default;
+    // v10: dop=true なら PCM へ変換せず、DoP（DSD over PCM）の形で出力する。
+    //   DSD 16bit分を1フレームに詰め、上位8bitにマーカー(0x05/0xFA交互)を置いた
+    //   24bitワードを左詰めint32で返す。出力レート＝DSDレート/16
+    //   （DSD64→176.4kHz、DSD128→352.8kHz、DSD256→705.6kHz）。
+    //   この値はビット単位でそのままDACへ届ける必要がある（DSP・音量・
+    //   リサンプル・16bit化は一切不可）。
+    explicit DsdPcmDecoder(bool dop = false) : m_dop(dop) {}
     ~DsdPcmDecoder() override { Close(); }
 
     bool Open(const std::wstring& filePath) override;
@@ -47,6 +53,7 @@ public:
 
     // 表示・診断用：元のDSDのサンプリング周波数（2822400など）
     uint32_t GetDsdRate() const { return m_dsdRate; }
+    bool IsDop() const { return m_dop; }
 
 private:
     enum class Container { None, Dsf, Dff };
@@ -59,6 +66,10 @@ private:
     size_t ReadDsdBytes(size_t n);
     bool SeekToByte(uint64_t byteIndex);
 
+    uint64_t  ReadFramesDop(int32_t* out, uint64_t frameCount);
+
+    bool      m_dop = false;         // v10: DoP出力モード
+    uint8_t   m_dopMarker = 0x05;    // v10: DoPマーカー（フレームごとに0x05/0xFAを交互）
     FILE*     m_fp = nullptr;
     Container m_container = Container::None;
     uint32_t  m_channels = 0;        // ファイルのチャンネル数(1 or 2)

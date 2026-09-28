@@ -468,12 +468,35 @@ void Player::fetchTagsAsync(const QString &filePath, int index, int serial)
 }
 
 // ── 新エンジン(PcmDualEngine)統合 ──────────────────────────────
+// ★ v10: DoP対応の入口。DoPがONでDSF/DFFなら、まずDoPで開く。DACが受け付けなければ
+//   （形式非対応・共有モード機器など）、従来どおりPCMへ変換して再生する。
 bool Player::tryPlayViaNewEngine(const QString &filePath)
+{
+    const QString ext = QFileInfo(filePath).suffix().toLower();
+    const bool isDsd = (ext == "dsf" || ext == "dff");
+    if (isDsd && m_dopEnabled && !m_deviceSharedMode) {
+        if (tryPlayViaNewEngineImpl(filePath, true)) return true;
+        qWarning() << "[DoP] 出力デバイスがDoPの形式を受け付けないため、PCM変換で再生します:" << filePath;
+    }
+    return tryPlayViaNewEngineImpl(filePath, false);
+}
+
+bool Player::tryPlayViaNewEngineImpl(const QString &filePath, bool dop)
 {
     stopNewEngine();
 
     const std::string extLower = QFileInfo(filePath).suffix().toLower().toStdString();
-    if (!m_pcmEngine.Open(filePath.toStdWString(), extLower)) {
+    m_pcmEngine.SetDopMode(dop);
+    m_newEngineOutput.SetDopMode(dop);
+    const bool opened = m_pcmEngine.Open(filePath.toStdWString(), extLower);
+    m_pcmEngine.SetDopMode(false);   // 次の曲は明示的に指定されない限りPCM
+    if (opened && dop && !m_pcmEngine.IsDop()) {   // 念のため：DoPで開けていなければ失敗扱い
+        m_pcmEngine.Close();
+        m_newEngineOutput.SetDopMode(false);
+        return false;
+    }
+    if (!opened) {
+        m_newEngineOutput.SetDopMode(false);
         m_lastEngineError = QString::fromUtf8("この形式・内容のファイルには対応していません");
         return false;
     }
@@ -491,7 +514,8 @@ bool Player::tryPlayViaNewEngine(const QString &filePath)
         const uint32_t mr = m_newEngineOutput.QueryMixRate();
         if (mr > 0) m_deviceFixedRate = mr;
     }
-    const uint32_t targetRate = computeNewEngineTargetRate(nativeRate);
+    // ★ v10: DoPはDSDレート/16のまま（リサンプル不可）
+    const uint32_t targetRate = dop ? nativeRate : computeNewEngineTargetRate(nativeRate);
 
     // ★ v10: 出力デバイスが目標レート（例：疑似DSD×8の352.8kHz）に排他モードで
     //   対応していない場合、以前はそのままmpvへ逃げていた。今は半分ずつ
@@ -499,11 +523,11 @@ bool Player::tryPlayViaNewEngine(const QString &filePath)
     //   自動で選ぶ。最後はネイティブ（原音）レート。
     // ★ v10: 前回までに「この機器は特定のレート／共有モードでしか鳴らない」と
     //   わかっていれば、最初からその形で開く（ギャップレス判定とも一致させる）。
-    m_newEngineOutput.SetSharedMode(m_deviceSharedMode);
+    m_newEngineOutput.SetSharedMode(dop ? false : m_deviceSharedMode);   // DoPは排他モードのみ
 
     QList<uint32_t> candidates;
     candidates << targetRate;
-    if (m_deviceFixedRate == 0) {
+    if (m_deviceFixedRate == 0 && !dop) {   // DoPはレートを下げられない
         for (uint32_t r = targetRate / 2; r > nativeRate && r >= 44100; r /= 2)
             candidates << r;
         if (!candidates.contains(nativeRate)) candidates << nativeRate;
@@ -524,7 +548,7 @@ bool Player::tryPlayViaNewEngine(const QString &filePath)
     //   ① 機器本来の形式（Windowsの「既定の形式」）のレートで、排他モードを試す。
     //   ② それも断られたら、共有モードで鳴らす（レートは同じく既定の形式に合わせ、
     //      周波数変換はAlways Engine自身のリサンプラーで行う）。
-    if (initResult != AudioBackendResult::Ok) {
+    if (initResult != AudioBackendResult::Ok && !dop) {   // DoPは共有モード等へは逃がさない（PCM変換へ）
         // 他のアプリがDACを使っていて排他を取れなかっただけなら、共有モードで
         // 鳴らすのはこの曲だけにする（次の曲では改めて排他モードを試す）。
         const bool deviceBusy = (m_newEngineOutput.GetLastHr() == AUDCLNT_E_DEVICE_IN_USE);
@@ -556,6 +580,7 @@ bool Player::tryPlayViaNewEngine(const QString &filePath)
         //   デバイスのロックが残ってしまわないよう、必ずShutdown()で完全に解放する。
         m_newEngineOutput.Shutdown();
         m_pcmEngine.Close();
+        m_newEngineOutput.SetDopMode(false);
         return false;
     }
 
@@ -577,8 +602,9 @@ bool Player::tryPlayViaNewEngine(const QString &filePath)
     m_newEngineProcessThread->SetDspCallback([this](float *buf, size_t n){
         m_newEngineDsp.Process(buf, n);
     });
-    m_newEngineProcessThread->SetBitPerfect(m_dspOff);
-    m_newEngineProcessThread->SetGain(volumeToGain(m_volume)); // v10: 音量
+    // ★ v10: DoPは値を1bitも変えてはいけないので、DSP・音量を完全にバイパスする
+    m_newEngineProcessThread->SetBitPerfect(m_dspOff || dop);
+    m_newEngineProcessThread->SetGain(dop ? 1.0 : volumeToGain(m_volume)); // v10: 音量
     // ★ 真の終端（ギャップレスで次曲へ継続しない、本当のストリーム終端）でのみ、
     //   リングバッファに残った端数フレームをゼロ埋めして出力するための問い合わせ。
     //   ギャップレス遷移中はIsEndOfStream()がfalseのままなので、この端数フラッシュは
@@ -1181,6 +1207,10 @@ void Player::tryPrepareGaplessNext(const QString &nextPath)
 {
     QString ext = QFileInfo(nextPath).suffix().toLower();
     if (!NEW_ENGINE_EXT.contains(ext)) return; // mpv経路の曲へは継ぎ目なし非対応
+    // ★ v10: DoPの曲の前後はギャップレスにしない（DoPとPCMでは、音量・DSPの扱いも
+    //   データの意味も違うため、同じストリームに続けて流すとノイズになる）。
+    if (m_pcmEngine.IsDop()) return;
+    if (m_dopEnabled && (ext == "dsf" || ext == "dff") && !m_deviceSharedMode) return;
 
     const std::string extLower = ext.toStdString();
     PcmDualEngine::GaplessInfo info = m_pcmEngine.PrepareGaplessNext(nextPath.toStdWString(), extLower);
@@ -1425,8 +1455,21 @@ void Player::setPinnedOutput(int rate, int bits)
 void Player::setVolume(int vol)
 {
     m_volume = qBound(0, vol, 100);
-    if (m_newEngineProcessThread)
+    // ★ v10: DoP中は音量をかけられない（かけるとDSDが壊れて大音量ノイズになる）。
+    //   音量はDAC側で調整してもらう。
+    if (m_newEngineProcessThread && !m_pcmEngine.IsDop())
         m_newEngineProcessThread->SetGain(volumeToGain(m_volume));
+}
+
+void Player::setDopEnabled(bool on)
+{
+    if (m_dopEnabled == on) return;
+    m_dopEnabled = on;
+    // 再生中のDSD曲には開き直して反映する（DoP⇔PCM変換の切り替え）
+    if (m_useNewEngine && (m_playing || m_paused) && m_currentIndex >= 0 && m_currentIndex < m_playlist.size()) {
+        const QString ext = QFileInfo(m_playlist[m_currentIndex]).suffix().toLower();
+        if (ext == "dsf" || ext == "dff") reloadNewEngineForRateChange();
+    }
 }
 
 void Player::setMode(const QString &mode, bool hp1, bool hp2, const QString &soundField)
@@ -1593,6 +1636,12 @@ QString Player::getInfo(const QString &mode) const
     }
     if (outKhz > 0)
         info += QString(" | %1 kHz").arg(outKhz, 0, 'f', 1);
+    // ★ v10: DoP出力中は「DoP DSD64」のように表示
+    if (m_useNewEngine && m_pcmEngine.IsDop() && m_newEngineOutputSr > 0) {
+        const int base = (m_newEngineOutputSr % 44100 == 0) ? 44100 : 48000;
+        info += QString(" / DoP DSD%1").arg(m_newEngineOutputSr * 16 / base);
+        return info;
+    }
     // v10: 共有モード（Bluetoothなど）はビット数ではなく「共有モード」と表示
     if (isSharedOutput())
         info += QString::fromUtf8(" / 共有モード");

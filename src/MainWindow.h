@@ -117,6 +117,7 @@ private:
     QPushButton *m_artistInfoBtn  = nullptr;
     QPushButton *m_bitPerfectBtn  = nullptr;
     QAction     *m_bpActOff       = nullptr;
+    QAction     *m_dopAct         = nullptr;   // v10: 「DoP出力（DSD対応DACのみ）」
     bool         m_bpManualOff    = false;   // ★ 手動OFFフラグ（true時は自動BitPerfectをスキップ）
     // ★ 「16種類の手動ビットパーフェクト」メニューで特定のレート/ビット数を
     //   選んだかどうかのフラグ。true の間は、曲が変わっても onTrackChanged() 内の
@@ -171,6 +172,7 @@ private:
     QString             m_savedPowerPlanSnapshot;
     QList<FavoriteList> m_favListsSnapshot;
     int                 m_activeListIndexSnapshot  = 0;
+    bool                m_dopSnapshot              = false;   // v10: DoP設定
 
     QString     m_currentFolder;
     QStringList m_allItems;

@@ -37,6 +37,10 @@ public:
     // ★ v10: ビットパーフェクト手動指定用。次のInitialize()で優先して試す
     //   有効ビット数（16/24/32）。0なら自動（32→24→24in32→16の順）。
     void SetPreferredBits(int bits) { m_preferredBits = bits; }
+    // ★ v10: DoP出力。24bit以上の形式しか使わず（16bitではマーカーが壊れる）、
+    //   VUメーターの計測もしない（DoPの値は音量ではないため）。
+    void SetDopMode(bool on) { m_dop = on; }
+    bool IsDopMode() const { return m_dop; }
 
     // ★ v10: 共有モード（Bluetoothなど、排他モードを受け付けない機器用）。
     //   trueにすると、次のInitialize()はWASAPI共有モードで開く。形式は
@@ -131,6 +135,7 @@ private:
     long long m_defaultPeriod = 0;
     long long m_minPeriod = 0;
     std::vector<uint8_t> m_convBuf;
+    bool m_dop    = false;   // v10: DoP出力中か
     bool m_shared = false;   // v10: 共有モードで開いているか（次回Initialize時の指定も兼ねる）
     bool m_float  = false;   // v10: デバイスへ渡す形式が32bit floatか（共有モード時）
 

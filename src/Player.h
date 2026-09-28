@@ -44,6 +44,10 @@ public:
     void next();
     void prev();
     void setVolume(int vol);
+    // ★ v10: DoP出力（DSD対応DACのみ）。初期値OFF。ONでもDACが受け付けなければPCM変換で再生する。
+    void setDopEnabled(bool on);
+    bool dopEnabled() const { return m_dopEnabled; }
+    bool dopActive()  const { return m_useNewEngine && m_pcmEngine.IsDop(); }
     void setMode(const QString &mode, bool hp1 = false, bool hp2 = false, const QString &soundField = QString());
     void setModeQuiet(const QString &mode) { m_mode = mode; }
     void setDspOff(bool off);   // DSP完全バイパス（SAEC・高調波・アップサンプリングすべて無効）
@@ -132,6 +136,7 @@ private:
     // 排他モード確保失敗・未対応フォーマットなど何らかの理由で開始できなければ
     // falseを返し、呼び出し側は従来通りmpv経路にフォールバックする。
     bool tryPlayViaNewEngine(const QString &filePath);
+    bool tryPlayViaNewEngineImpl(const QString &filePath, bool dop); // v10: DoP対応の本体
     void stopNewEngine();
     void checkNewEngineEof();  // 新エンジン再生中のEOFポーリング（タイマー）
 
@@ -298,6 +303,7 @@ private:
     //   出力先が変わったらリセットして調べ直す。
     uint32_t m_deviceFixedRate = 0;
     bool     m_deviceSharedMode = false;
+    bool     m_dopEnabled       = false;   // v10: DoP出力の設定（ユーザー指定）
     bool tryInitOutput(uint32_t rate, AudioBackendResult &result);
 
     // タグ読み取りスレッドの世代管理（古いスレッド結果を破棄するためのシリアル番号）

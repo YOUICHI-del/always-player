@@ -965,12 +965,17 @@ void MainWindow::setupUI()
 
     // ★ v10: DoP出力（初期OFF）。レート選択のグループとは独立したON/OFF項目。
     bpMenu->addSeparator();
-    m_dopAct = bpMenu->addAction(QString::fromUtf8("DoP出力（DSD対応DACのみ）"));
+    m_dopAct = bpMenu->addAction(QString::fromUtf8("DoP出力（DSD対応DACのみ・機器ごとに記憶）"));
     m_dopAct->setCheckable(true);
     m_dopAct->setChecked(false);
     m_dopAct->setToolTip(QString::fromUtf8(
         "DSF/DFFをDSDのままDACへ送ります。DSD非対応のDACでは大きなノイズになるので、"
-        "対応DACのときだけONにしてください。DoP中は音量スライダーは効きません（DAC側で調整）。"));
+        "対応DACのときだけONにしてください。DoP中は音量スライダーは効きません（DAC側で調整）。"
+        "設定は出力デバイスごとに記憶され、別の機器に切り替えると自動でOFFになります。"));
+    // v10: 出力デバイスの切替でDoP設定が変わったら、メニューのチェックも追従させる
+    connect(m_player, &Player::dopStateChanged, this, [this](bool on) {
+        if (m_dopAct) m_dopAct->setChecked(on);
+    });
 
     connect(bpMenu, &QMenu::triggered, this, [this](QAction *act) {
         // ★ v10: DoP項目はレート選択ではない（dataを持たないので下の処理に進ませない）
@@ -978,7 +983,8 @@ void MainWindow::setupUI()
             const bool on = m_dopAct->isChecked();
             if (on) {
                 QMessageBox::warning(this, QStringLiteral("Always Player"),
-                    QString::fromUtf8("DoP出力をONにしました。\n\n"
+                    QString::fromUtf8("今の出力デバイスでDoP出力をONにしました。\n"
+                        "（別の出力デバイスに切り替えると自動でOFFになります）\n\n"
                         "DSD非対応のDACでは「サー」という大きなノイズになります。\n"
                         "最初はDAC・アンプの音量を下げてから再生してください。\n"
                         "DoP中は音量スライダーは効きません（DAC側で調整してください）。"));
@@ -2517,7 +2523,7 @@ void MainWindow::saveFavorites()
     m_savedPowerPlanSnapshot  = m_savedPowerPlan;
     m_favListsSnapshot        = m_favoriteLists;
     m_activeListIndexSnapshot = m_activeListIndex;
-    m_dopSnapshot             = m_dopAct && m_dopAct->isChecked();
+    m_dopDevicesSnapshot      = m_player->dopDevices();
 
     bool bpOn = !m_bpActOff->isChecked();
     int  bpRate = 0, bpBits = 0;
@@ -2556,7 +2562,7 @@ void MainWindow::scheduleSave()
             m_savedPowerPlanSnapshot  = m_savedPowerPlan;
             m_favListsSnapshot        = m_favoriteLists;
             m_activeListIndexSnapshot = m_activeListIndex;
-            m_dopSnapshot             = m_dopAct && m_dopAct->isChecked();
+            m_dopDevicesSnapshot      = m_player->dopDevices();
 
             QString sfSnapshot = m_soundField;
             bool   bpOn   = !m_bpActOff->isChecked();
@@ -2607,6 +2613,7 @@ void MainWindow::writeFavoritesToDisk(const QMap<QString, QString> &favorites,
                 if (line.trimmed() == "[sound_field]")  { inFav = true;  continue; }
                 if (line.trimmed() == "[dsp]")           { inFav = true;  continue; }
                 if (line.trimmed() == "[bitperfect]")    { inFav = true;  continue; }
+                if (line.trimmed() == "[dop]")           { inFav = true;  continue; }   // v10
                 if (line.trimmed() == "[power]")         { inFav = true;  continue; }
                 if (line.trimmed() == "[favorites_meta]"){ inFav = true;  continue; }
                 if (line.trimmed().startsWith("[favorites_list_")) { inFav = true; continue; }
@@ -2634,11 +2641,14 @@ void MainWindow::writeFavoritesToDisk(const QMap<QString, QString> &favorites,
             out << "plan=" << m_savedPowerPlanSnapshot << "\n";
         out << "[bitperfect]\n";
         out << "enabled=" << (bpOn ? "1" : "0") << "\n";
-        out << "dop=" << (m_dopSnapshot ? "1" : "0") << "\n";   // v10
         if (bpOn && bpRate > 0) {
             out << "rate=" << bpRate << "\n";
             out << "bits=" << bpBits << "\n";
         }
+        // v10: DoPをONにした出力デバイス（機器ごとに記憶）
+        out << "[dop]\n";
+        for (const QString &id : m_dopDevicesSnapshot)
+            out << "dev=" << id << "\n";
         out << "[favorites_meta]\n";
         out << "count=" << m_favListsSnapshot.size() << "\n";
         out << "active=" << m_activeListIndexSnapshot << "\n";
@@ -2713,12 +2723,15 @@ void MainWindow::loadFavorites()
     int  inListIdx = -1;
     int  bpRate  = 0, bpBits = 0, bpEnabled = 0;
     QString savedPowerPlan;
+    bool inDop = false;          // v10
+    QStringList dopDevices;      // v10
     m_favoriteLists.clear();
 
     while (!in.atEnd()) {
         QString line = in.readLine().trimmed();
         if (line == "[sound_field]")   { inSound = true;  inFav = false; inDsp = false; inBp = false; inMeta = false; inPower = false; inListIdx = -1; continue; }
         if (line == "[dsp]")           { inDsp   = true;  inFav = false; inSound = false; inBp = false; inMeta = false; inPower = false; inListIdx = -1; continue; }
+        if (line.startsWith("[")) inDop = (line == "[dop]");   // v10（他のセクション見出しでは自動的にfalse）
         if (line == "[bitperfect]")    { inBp    = true;  inFav = false; inSound = false; inDsp = false; inMeta = false; inPower = false; inListIdx = -1; continue; }
         if (line == "[power]")         { inPower = true;  inFav = false; inSound = false; inDsp = false; inBp = false; inMeta = false; inListIdx = -1; continue; }
         if (line == "[favorites_meta]"){ inMeta  = true;  inFav = false; inSound = false; inDsp = false; inBp = false; inPower = false; inListIdx = -1; continue; }
@@ -2744,11 +2757,8 @@ void MainWindow::loadFavorites()
             bpRate = line.mid(5).toInt();
         if (inBp && line.startsWith("bits="))
             bpBits = line.mid(5).toInt();
-        if (inBp && line.startsWith("dop=")) {   // v10: DoP出力の設定
-            const bool dopOn = (line.mid(4) == "1");
-            if (m_dopAct) m_dopAct->setChecked(dopOn);
-            m_player->setDopEnabled(dopOn);
-        }
+        if (inDop && line.startsWith("dev="))   // v10: DoPをONにした出力デバイス
+            dopDevices << line.mid(4);
         if (inPower && line.startsWith("plan=")) {
             savedPowerPlan = line.mid(5).trimmed();
             m_savedPowerPlan = savedPowerPlan;
@@ -2784,6 +2794,9 @@ void MainWindow::loadFavorites()
         fl.name = QString::fromUtf8("\xe3\x83\xaa\xe3\x82\xb9\xe3\x83\x88") + "1";
         m_favoriteLists.append(fl);
     }
+    // v10: DoPをONにした出力デバイスを復元し、今のデバイスに合わせてメニューを更新
+    m_player->setDopDevices(dopDevices);
+    if (m_dopAct) m_dopAct->setChecked(m_player->dopEnabled());
     if (m_activeListIndex >= m_favoriteLists.size())
         m_activeListIndex = 0;
     // 読み込んだ音場効果をPlayerに反映

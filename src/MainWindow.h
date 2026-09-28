@@ -172,7 +172,7 @@ private:
     QString             m_savedPowerPlanSnapshot;
     QList<FavoriteList> m_favListsSnapshot;
     int                 m_activeListIndexSnapshot  = 0;
-    bool                m_dopSnapshot              = false;   // v10: DoP設定
+    QStringList         m_dopDevicesSnapshot;                  // v10: DoPをONにした出力デバイス
 
     QString     m_currentFolder;
     QStringList m_allItems;

@@ -108,6 +108,7 @@ bool Player::init()
         AudioDeviceInfo info;
         if (AudioDeviceWatcher::QueryDefaultRenderDevice(info))
             m_currentDeviceId = QString::fromStdWString(info.id);
+        refreshDopForCurrentDevice();   // v10: 先にiniから復元済みの場合に備えて
     }
     deviceLog(QStringLiteral("===== Always Player started. watcher=%1 initialDevice=%2")
               .arg(watcherOk ? QStringLiteral("OK") : QStringLiteral("FAILED"))
@@ -901,6 +902,7 @@ void Player::onDefaultDeviceChangedRaw(const char *source)
 
     if (newId == m_currentDeviceId) return;   // 変化なし
     m_currentDeviceId = newId;
+    refreshDopForCurrentDevice();   // v10: DoP設定は機器ごと（非対応機器では自動でOFF）
     // ★ v10: 出力先が変わったので、対応レート・共有モードの判定を調べ直す
     //   （以前は再生中に切り替えたときだけリセットしていた）。
     m_unsupportedOutRates.clear();
@@ -1461,8 +1463,29 @@ void Player::setVolume(int vol)
         m_newEngineProcessThread->SetGain(volumeToGain(m_volume));
 }
 
+void Player::setDopDevices(const QStringList &ids)
+{
+    m_dopDevices = QSet<QString>(ids.begin(), ids.end());
+    m_dopDevices.remove(QString());
+    refreshDopForCurrentDevice();
+}
+
+// ★ v10: 今の既定出力デバイスがDoPをONにした機器かどうかで、DoP設定を切り替える。
+//   （出力先が変わったときは再生自体が止まるので、ここでは設定とメニュー表示だけ）
+void Player::refreshDopForCurrentDevice()
+{
+    const bool on = !m_currentDeviceId.isEmpty() && m_dopDevices.contains(m_currentDeviceId);
+    if (on == m_dopEnabled) return;
+    m_dopEnabled = on;
+    emit dopStateChanged(on);
+}
+
 void Player::setDopEnabled(bool on)
 {
+    if (!m_currentDeviceId.isEmpty()) {
+        if (on) m_dopDevices.insert(m_currentDeviceId);
+        else    m_dopDevices.remove(m_currentDeviceId);
+    }
     if (m_dopEnabled == on) return;
     m_dopEnabled = on;
     // 再生中のDSD曲には開き直して反映する（DoP⇔PCM変換の切り替え）

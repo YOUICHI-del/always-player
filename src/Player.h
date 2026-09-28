@@ -45,7 +45,11 @@ public:
     void prev();
     void setVolume(int vol);
     // ★ v10: DoP出力（DSD対応DACのみ）。初期値OFF。ONでもDACが受け付けなければPCM変換で再生する。
+    //   設定は出力デバイスごとに記憶する（今の既定デバイスに対してON/OFF）。
+    //   DoP対応DACでONにしても、別の機器へ切り替えれば自動でOFFになる。
     void setDopEnabled(bool on);
+    void setDopDevices(const QStringList &ids);   // iniから復元
+    QStringList dopDevices() const { return QStringList(m_dopDevices.begin(), m_dopDevices.end()); }
     bool dopEnabled() const { return m_dopEnabled; }
     bool dopActive()  const { return m_useNewEngine && m_pcmEngine.IsDop(); }
     void setMode(const QString &mode, bool hp1 = false, bool hp2 = false, const QString &soundField = QString());
@@ -127,6 +131,7 @@ signals:
     void playbackStopped();
     void playbackPaused();
     void errorOccurred(const QString &msg);
+    void dopStateChanged(bool on);   // v10: 出力デバイス切替などでDoP設定が変わった
 
 private:
     QStringList collectFiles(const QString &folder, int depth = 0);
@@ -303,7 +308,9 @@ private:
     //   出力先が変わったらリセットして調べ直す。
     uint32_t m_deviceFixedRate = 0;
     bool     m_deviceSharedMode = false;
-    bool     m_dopEnabled       = false;   // v10: DoP出力の設定（ユーザー指定）
+    bool     m_dopEnabled       = false;   // v10: 今の出力デバイスでDoPがONか
+    QSet<QString> m_dopDevices;            // v10: DoPをONにした出力デバイスのID
+    void refreshDopForCurrentDevice();
     bool tryInitOutput(uint32_t rate, AudioBackendResult &result);
 
     // タグ読み取りスレッドの世代管理（古いスレッド結果を破棄するためのシリアル番号）

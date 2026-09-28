@@ -19,6 +19,8 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <windows.h>
+#include <io.h>        // _get_osfhandle
+#include "IniFileLock.h"
 
 // ★ ギャップレス関連デバッグログ用：実時間（起動からのミリ秒）を付与し、
 //   VS出力ウィンドウのログから実際のタイミングを検証できるようにする。
@@ -179,27 +181,89 @@ void Player::loadFolder(const QString &path)
     m_currentIndex = 0;
     m_lastFolder = path;
 
-    // 最後のフォルダをiniに保存（アトミックセーブ方式）
-    QString ini = QDir::homePath() + "/AlwaysPlayer.ini";
-    QString tmp = ini + ".tmp";
-    QString bak = ini + ".bk";
-    // ① tmpに書く
+    saveLastFolderToIni(path);
+}
+
+// ★ v10修正（重大）：最後のフォルダをiniに保存する。
+//   以前は「[settings] と last_folder の2行だけ」を書いたファイルで
+//   AlwaysPlayer.ini を丸ごと置き換えていた。そのため、フォルダを開くたび
+//   （起動直後の自動読み込みを含む）にiniからお気に入り・音場・BitPerfect等が
+//   消え、次にMainWindow側が保存するまでの間にフリーズ・強制終了すると
+//   お気に入りがすべて失われていた（「フリーズのたびに消える」の真因）。
+//   今は既存の内容をすべて残し、[settings] の last_folder 行だけを差し替える。
+//   書き込みはMainWindowと同じmutexで直列化し、MoveFileExWで一度に置き換える。
+void Player::saveLastFolderToIni(const QString &path)
+{
+    QMutexLocker iniLock(&iniFileMutex());
+    const QString ini = QDir::homePath() + "/AlwaysPlayer.ini";
+    const QString tmp = ini + ".lf.tmp";
+
+    // 既存の内容を読み込み、[settings]のlast_folderだけ差し替える
+    QStringList lines;
+    {
+        QFile rf(ini);
+        if (rf.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream in(&rf);
+            in.setEncoding(QStringConverter::Utf8);
+            while (!in.atEnd()) lines << in.readLine();
+        } else if (QFile::exists(ini)) {
+            return; // 存在するのに読めない（他プロセスがロック中など）：壊さないよう何もしない
+        }
+    }
+    bool inSettings = false, replaced = false;
+    int settingsHeader = -1;
+    for (int i = 0; i < lines.size(); ++i) {
+        const QString t = lines[i].trimmed();
+        if (t.startsWith('[')) {
+            inSettings = (t == "[settings]");
+            if (inSettings && settingsHeader < 0) settingsHeader = i;
+            continue;
+        }
+        if (inSettings && t.startsWith("last_folder=")) {
+            lines[i] = "last_folder=" + path;
+            replaced = true;
+            break;
+        }
+    }
+    if (!replaced) {
+        if (settingsHeader >= 0) {
+            lines.insert(settingsHeader + 1, "last_folder=" + path);
+        } else {
+            lines.prepend("last_folder=" + path);
+            lines.prepend("[settings]");
+        }
+    }
+
+    // tmpに書いてディスクまでフラッシュ
     {
         QFile f(tmp);
         if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) return;
-        QTextStream s(&f);
-        s << "[settings]\n";
-        s << "last_folder=" << path << "\n";
-        s.flush(); f.flush();
+        QTextStream out(&f);
+        out.setEncoding(QStringConverter::Utf8);
+        for (const QString &l : lines) out << l << "\n";
+        out.flush();
+        f.flush();
+        if (f.handle() >= 0)
+            FlushFileBuffers(reinterpret_cast<HANDLE>(_get_osfhandle(f.handle())));
+        f.close();
+        if (out.status() != QTextStream::Ok || f.error() != QFileDevice::NoError) {
+            QFile::remove(tmp);
+            return;
+        }
     }
-    // ② 既存iniをバックアップ
-    if (QFile::exists(ini)) {
-        QFile::remove(bak);
-        QFile::rename(ini, bak);
+    // tmp → ini を一度に置き換え（iniが存在しない瞬間を作らない）
+    const std::wstring tmpW = QDir::toNativeSeparators(tmp).toStdWString();
+    const std::wstring iniW = QDir::toNativeSeparators(ini).toStdWString();
+    bool moved = false;
+    for (int attempt = 0; attempt < 5 && !moved; ++attempt) {
+        if (attempt > 0) Sleep(100);
+        moved = MoveFileExW(tmpW.c_str(), iniW.c_str(),
+                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
     }
-    // ③ tmp → ini
-    QFile::rename(tmp, ini);
-
+    if (!moved) {
+        qWarning() << "[INI] last_folder save failed:" << GetLastError();
+        QFile::remove(tmp);
+    }
 }
 
 void Player::play(int index)

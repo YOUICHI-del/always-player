@@ -36,6 +36,7 @@ public:
 
     bool init();
     void loadFolder(const QString &path);
+    void saveLastFolderToIni(const QString &path); // v10: iniの last_folder 行だけを更新
     void play(int index = -1);
     void pause();
     void resume();

@@ -45,6 +45,7 @@
 #include <QtConcurrent>
 #include <QFutureWatcher>
 #include <QMutex>
+#include "IniFileLock.h"
 #include <windows.h>
 #include <io.h>        // _get_osfhandle（INI保存のFlushFileBuffers用）
 #include <mmsystem.h>  // MCI CD再生
@@ -2479,14 +2480,13 @@ void MainWindow::onShowFavorites()
 //   2秒後のバックグラウンド保存が同時に走ると、同じ .tmp に同時に書いたり、
 //   書き込み中のスナップショットをGUI側が上書きしたりして、INI消失や
 //   クラッシュの原因になっていた。スナップショットの代入と書き込みの両方を
-//   このmutexで囲む。
-static QMutex s_iniMutex;
+//   このmutexで囲む（Playerの最後のフォルダ保存とも共通。IniFileLock.h参照）。
 
 // 終了時専用：GUIスレッドで即時・同期保存
 void MainWindow::saveFavorites()
 {
     if (m_iniSaveTimer) m_iniSaveTimer->stop();
-    QMutexLocker iniLock(&s_iniMutex);
+    QMutexLocker iniLock(&iniFileMutex());
 
     // ★ スナップショットを設定してから書き込む
     m_dspOffSnapshot          = m_player->dspOff();
@@ -2526,7 +2526,7 @@ void MainWindow::scheduleSave()
             //    メンバーに触らないためにここで全て値コピーする）
             // ★ v10修正：バックグラウンド書き込み中にスナップショットを上書きしないよう、
             //   書き込み側と同じmutexで囲む（書き込み中なら終わるまで待つ）。
-            QMutexLocker snapLock(&s_iniMutex);
+            QMutexLocker snapLock(&iniFileMutex());
             m_dspOffSnapshot          = m_player->dspOff();
             m_chainOnSnapshot         = m_player->chainOn();
             m_savedPowerPlanSnapshot  = m_savedPowerPlan;
@@ -2550,7 +2550,7 @@ void MainWindow::scheduleSave()
             snapLock.unlock();
             // バックグラウンドスレッドには引数だけ渡す（this経由でメンバーを読むのはNG）
             QThreadPool::globalInstance()->start([this, sfSnapshot, bpOn, bpRate, bpBits] {
-                QMutexLocker writeLock(&s_iniMutex);
+                QMutexLocker writeLock(&iniFileMutex());
                 writeFavoritesToDisk({}, sfSnapshot, bpOn, bpRate, bpBits);
             });
         });

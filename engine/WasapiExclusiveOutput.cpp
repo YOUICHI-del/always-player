@@ -211,8 +211,16 @@ AudioBackendResult WasapiExclusiveOutput::Initialize(const AudioFormat& format) 
     // ここでまとめて確保しておく。44.1kHz/最小バッファ周期の場合、
     // 曲1曲(~10分)でもコールバック回数は数万〜数十万程度に収まるため、
     // 余裕を見て200万エントリ(int64_t×200万=16MB)を確保する。
-    m_wakeTimestampCapacity = 2'000'000;
-    m_wakeTimestamps.assign(m_wakeTimestampCapacity, 0);
+    // ★ v10: 計測は診断出力先が指定されたとき（開発時）だけ行う。配布版では
+    //   16MBの確保もRTスレッドでの記録も行わない（容量0なら記録処理は素通り）。
+    if (!m_diagPath.empty()) {
+        m_wakeTimestampCapacity = 2'000'000;
+        m_wakeTimestamps.assign(m_wakeTimestampCapacity, 0);
+    } else {
+        m_wakeTimestampCapacity = 0;
+        m_wakeTimestamps.clear();
+        m_wakeTimestamps.shrink_to_fit();
+    }
     m_wakeTimestampCount.store(0, std::memory_order_relaxed);
     m_underrunCount.store(0, std::memory_order_relaxed);
     m_totalCallbacks.store(0, std::memory_order_relaxed);

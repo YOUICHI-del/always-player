@@ -674,7 +674,13 @@ void Player::seekTo(double seconds)
     if (m_useNewEngine) {
         if (seconds < 0.0) seconds = 0.0;
         if (seconds > m_newEngineDuration) seconds = m_newEngineDuration;
+        // ★ v10修正：Seek()はリングバッファをClear()する。処理スレッドが読んでいる
+        //   最中にClear()すると読み出し位置が狂い、ゴミデータ（大音量ノイズ）が
+        //   出る恐れがあるため、シークの間だけ処理スレッドを止める。
+        const bool procWasRunning = m_newEngineProcessThread && m_newEngineProcessThread->IsRunning();
+        if (procWasRunning) m_newEngineProcessThread->Stop();
         m_pcmEngine.Seek(seconds);
+        if (procWasRunning) m_newEngineProcessThread->Start();
         m_newEnginePositionBase = seconds;
         m_newEngineElapsedTimer.restart();
         // ★ シークは「今表示している曲の中の位置」を直接指定する操作なので、
@@ -697,6 +703,11 @@ void Player::pause()
     if (m_useNewEngine) {
         if (!m_playing) return;
         m_newEnginePositionBase += m_newEngineElapsedTimer.elapsed() / 1000.0;
+        // ★ v10修正（フリーズ対策）：以前は処理スレッドを動かしたまま出力だけ止めて
+        //   いたため、処理スレッドがWriteFrames()の中で出力リングの空きを永久に待ち、
+        //   一時停止後に次曲／停止／終了／出力切替をするとjoin()でGUIごと固まっていた。
+        //   出力がまだ動いている（リングが捌ける）うちに、処理スレッドを先に止める。
+        if (m_newEngineProcessThread) m_newEngineProcessThread->Stop();
         m_pcmEngine.StopDecoding();
         m_newEngineOutput.Stop();
         m_playing = false;
@@ -712,6 +723,8 @@ void Player::resume()
         if (m_paused) {
             m_newEngineOutput.Start();
             m_pcmEngine.StartDecoding();
+            // ★ v10修正：pause()で止めた処理スレッドを再開する
+            if (m_newEngineProcessThread) m_newEngineProcessThread->Start();
             m_newEngineElapsedTimer.restart();
             m_playing = true;
             m_paused  = false;

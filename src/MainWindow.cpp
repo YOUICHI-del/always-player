@@ -44,7 +44,9 @@
 #include <QJsonArray>
 #include <QtConcurrent>
 #include <QFutureWatcher>
+#include <QMutex>
 #include <windows.h>
+#include <io.h>        // _get_osfhandle（INI保存のFlushFileBuffers用）
 #include <mmsystem.h>  // MCI CD再生
 #include <shellapi.h>
 #include <powrprof.h>
@@ -2473,10 +2475,18 @@ void MainWindow::onShowFavorites()
     dlg->deleteLater();
 }
 
+// ★ v10修正：INI保存を1本に直列化する。終了時の同期保存(GUIスレッド)と
+//   2秒後のバックグラウンド保存が同時に走ると、同じ .tmp に同時に書いたり、
+//   書き込み中のスナップショットをGUI側が上書きしたりして、INI消失や
+//   クラッシュの原因になっていた。スナップショットの代入と書き込みの両方を
+//   このmutexで囲む。
+static QMutex s_iniMutex;
+
 // 終了時専用：GUIスレッドで即時・同期保存
 void MainWindow::saveFavorites()
 {
     if (m_iniSaveTimer) m_iniSaveTimer->stop();
+    QMutexLocker iniLock(&s_iniMutex);
 
     // ★ スナップショットを設定してから書き込む
     m_dspOffSnapshot          = m_player->dspOff();
@@ -2514,6 +2524,9 @@ void MainWindow::scheduleSave()
 
             // ★ GUIスレッドで全スナップショットを取得（バックグラウンドスレッドから
             //    メンバーに触らないためにここで全て値コピーする）
+            // ★ v10修正：バックグラウンド書き込み中にスナップショットを上書きしないよう、
+            //   書き込み側と同じmutexで囲む（書き込み中なら終わるまで待つ）。
+            QMutexLocker snapLock(&s_iniMutex);
             m_dspOffSnapshot          = m_player->dspOff();
             m_chainOnSnapshot         = m_player->chainOn();
             m_savedPowerPlanSnapshot  = m_savedPowerPlan;
@@ -2534,8 +2547,10 @@ void MainWindow::scheduleSave()
                 }
             }
             m_iniDirty = false;
+            snapLock.unlock();
             // バックグラウンドスレッドには引数だけ渡す（this経由でメンバーを読むのはNG）
             QThreadPool::globalInstance()->start([this, sfSnapshot, bpOn, bpRate, bpBits] {
+                QMutexLocker writeLock(&s_iniMutex);
                 writeFavoritesToDisk({}, sfSnapshot, bpOn, bpRate, bpBits);
             });
         });
@@ -2610,24 +2625,55 @@ void MainWindow::writeFavoritesToDisk(const QMap<QString, QString> &favorites,
         }
         out.flush();
         f.flush();
-        // ★ flush後に明示的にclose（OSのバッファをディスクに落とす）
+        // ★ v10修正：close()だけではOSのキャッシュに残るだけなので、
+        //   FlushFileBuffersで実際にディスクまで書き切ってから置き換える。
+        if (f.handle() >= 0)
+            FlushFileBuffers(reinterpret_cast<HANDLE>(_get_osfhandle(f.handle())));
         f.close();
+        if (out.status() != QTextStream::Ok || f.error() != QFileDevice::NoError) {
+            QFile::remove(tmp);   // 書き込み失敗：iniには一切触らない
+            return;
+        }
     }
 
-    // ② ini → bak（バックアップ。失敗しても続行）
-    QFile::remove(bak);
-    QFile::copy(ini, bak);
+    // ② ini → bak（バックアップ）。
+    // ★ v10修正：以前は無条件に bak を先に消していたため、ini が無い状態で
+    //   保存が走ると bak まで失われていた。ini が存在するときだけ更新する。
+    if (QFile::exists(ini)) {
+        QFile::remove(bak);
+        QFile::copy(ini, bak);
+    }
 
-    // ③ tmp → ini（Windows: MoveFileExW で上書きリネーム。
-    //    ini を先に remove しないのでフリーズしても ini が消えない）
-    QFile::remove(ini);
-    QFile::rename(tmp, ini);
+    // ③ tmp → ini を1回のAPIで上書き置換する（本当のアトミック置換）。
+    // ★ v10修正：以前は QFile::remove(ini) → QFile::rename(tmp, ini) の2段階で、
+    //   その間に落ちる、またはウイルス対策ソフト等が ini を掴んでいて rename が
+    //   失敗すると ini が消え、お気に入りが空になっていた。
+    //   MoveFileExW(REPLACE_EXISTING) なら ini が存在しない瞬間がない。
+    const std::wstring tmpW = QDir::toNativeSeparators(tmp).toStdWString();
+    const std::wstring iniW = QDir::toNativeSeparators(ini).toStdWString();
+    bool moved = false;
+    for (int attempt = 0; attempt < 5 && !moved; ++attempt) {
+        if (attempt > 0) Sleep(100);   // 他プロセスが一時的に掴んでいる場合に備えて再試行
+        moved = MoveFileExW(tmpW.c_str(), iniW.c_str(),
+                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    }
+    if (!moved)
+        qWarning() << "[INI] MoveFileExW failed:" << GetLastError() << "(ini は旧内容のまま)";
 }
 
 void MainWindow::loadFavorites()
 {
     m_favorites.clear();
     QString ini = QDir::homePath() + "/AlwaysPlayer.ini";
+    // ★ v10修正：ini が無い（過去の保存失敗などで消えた）ときは bak から復元する。
+    //   以前は復元処理が無く、空のまま起動→次の保存で空リストが確定していた。
+    {
+        const QString bak = QDir::homePath() + "/AlwaysPlayer.ini.bak";
+        if (!QFile::exists(ini) && QFile::exists(bak)) {
+            qWarning() << "[INI] AlwaysPlayer.ini が見つからないため .bak から復元します";
+            QFile::copy(bak, ini);
+        }
+    }
     QFile f(ini);
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return;
     QTextStream in(&f);

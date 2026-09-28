@@ -313,6 +313,9 @@ AudioBackendResult WasapiExclusiveOutput::WriteFrames(const uint8_t* data, uint3
 
     size_t bytesToWrite = static_cast<size_t>(frameCount) * m_bytesPerFrame;
     size_t written = 0;
+    // v10: 空き待ちが始まった時刻（時間で判定する。wait_forは述語が即成立して
+    //   すぐ戻ることが多く、回数で数えると通常の待ちでも一瞬で上限に達してしまう）
+    std::chrono::steady_clock::time_point stallStart{};
 
     while (written < bytesToWrite) {
         size_t writeIdx = m_writeIndex.load(std::memory_order_relaxed);
@@ -320,12 +323,24 @@ AudioBackendResult WasapiExclusiveOutput::WriteFrames(const uint8_t* data, uint3
         size_t freeSpace = (readIdx + m_ringCapacity - writeIdx - 1) % m_ringCapacity;
 
         if (freeSpace == 0) {
+            // ★ v10修正（フリーズ対策の保険）：以前はここに抜け出す条件が無く、
+            //   出力停止中やデバイス喪失（USB DAC抜去・Bluetooth切断）でリングが
+            //   捌けなくなると永久に待ち続け、呼び出し元スレッドのjoin()で
+            //   アプリ全体が固まっていた。
+            if (!m_running.load()) return AudioBackendResult::Ok;           // 出力停止中は待たない
+            const auto now = std::chrono::steady_clock::now();
+            if (stallStart == std::chrono::steady_clock::time_point{}) {
+                stallStart = now;
+            } else if (now - stallStart > std::chrono::milliseconds(500)) {
+                return AudioBackendResult::DeviceLost;                       // 0.5秒進まなければ諦める
+            }
             std::unique_lock<std::mutex> lock(m_backpressureMutex);
             m_backpressureCv.wait_for(lock, std::chrono::milliseconds(2), [&] {
                 return m_readIndex.load(std::memory_order_acquire) != writeIdx;
             });
             continue;
         }
+        stallStart = std::chrono::steady_clock::time_point{};
 
         size_t chunk = std::min(bytesToWrite - written, freeSpace);
         size_t firstPart = std::min(chunk, m_ringCapacity - writeIdx);

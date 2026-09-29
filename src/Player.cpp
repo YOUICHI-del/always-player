@@ -1,4 +1,5 @@
 #include "Player.h"
+#include "AlbumArt.h"
 #include <shlwapi.h>  // StrCmpLogicalW（自然順ソート）
 #include <intrin.h>   // __cpuid（CPUスペック判定）
 #pragma comment(lib, "shlwapi.lib")
@@ -295,7 +296,7 @@ void Player::play(int index)
     if (!isCd) {
         ext = QFileInfo(file).suffix().toLower();
         if (!NEW_ENGINE_EXT.contains(ext)) {
-            emit errorOccurred(QString("非対応フォーマット: %1").arg(ext));
+            emit errorOccurred(QObject::tr("非対応フォーマット: %1").arg(ext));
             return;
         }
     }
@@ -323,9 +324,9 @@ if (isCd) return; // v10: CDはMainWindow側（MCI）で再生するのでここ
         m_paused  = false;
         const QString name = QFileInfo(file).fileName();
         const QString reason = m_lastEngineError.isEmpty()
-            ? QString::fromUtf8("再生できませんでした") : m_lastEngineError;
+            ? QObject::tr("再生できませんでした") : m_lastEngineError;
         QMetaObject::invokeMethod(this, [this, name, reason]{
-            emit errorOccurred(QString::fromUtf8("再生できません：%1（%2）").arg(name, reason));
+            emit errorOccurred(QObject::tr("再生できません：%1（%2）").arg(name, reason));
         }, Qt::QueuedConnection);
         ++m_consecutiveEngineFailures;
         if (m_repeatMode != RepeatMode::One && m_consecutiveEngineFailures < m_playlist.size()) {
@@ -475,34 +476,56 @@ bool Player::tryPlayViaNewEngine(const QString &filePath)
 {
     const QString ext = QFileInfo(filePath).suffix().toLower();
     const bool isDsd = (ext == "dsf" || ext == "dff");
-    if (isDsd && m_dopEnabled && !m_deviceSharedMode) {
+    // ★ v10: ASIO4ALL・FlexASIOなどWDMを包むASIOは、途中でデータが1bit単位では保たれないことがあり、
+    //   DoPがノイズになる（実機で確認）。これらではDoPを使わず、PCM変換で再生する。
+    const QString drv = QString::fromStdWString(m_asioOutput.DriverName());
+    const bool wdmWrappedAsio = m_useAsio && (drv.contains(QLatin1String("ASIO4ALL"), Qt::CaseInsensitive)
+                                           || drv.contains(QLatin1String("FlexASIO"), Qt::CaseInsensitive));
+    // ★ v10: ネイティブDSD。ASIOドライバが「DSDに対応している」と答えた場合だけ、DSDのまま送る
+    //   （ドライバ自身が対応を宣言しているので、DoPのようなノイズの危険はない）。
+    //   開けなければ、DoP（ONのとき）→PCM変換の順に自動で切り替える。
+    if (isDsd && m_useAsio && !wdmWrappedAsio && m_asioOutput.SupportsNativeDsd()) {
+        if (tryPlayViaNewEngineImpl(filePath, false, true)) return true;
+        qWarning() << "[DSD] ネイティブDSDで開けなかったため、DoP/PCM変換で再生します:" << filePath;
+    }
+    if (isDsd && m_dopEnabled && !wdmWrappedAsio && (m_useAsio || !m_deviceSharedMode)) {
         if (tryPlayViaNewEngineImpl(filePath, true)) return true;
         qWarning() << "[DoP] 出力デバイスがDoPの形式を受け付けないため、PCM変換で再生します:" << filePath;
     }
     return tryPlayViaNewEngineImpl(filePath, false);
 }
 
-bool Player::tryPlayViaNewEngineImpl(const QString &filePath, bool dop)
+bool Player::tryPlayViaNewEngineImpl(const QString &filePath, bool dop, bool nativeDsd)
 {
     stopNewEngine();
 
+    // ★ v10: DoP／ネイティブDSDは、値を1bitも変えてはいけない（DSP・音量・リサンプル不可）
+    const bool bitExact = dop || nativeDsd;
     const std::string extLower = QFileInfo(filePath).suffix().toLower().toStdString();
     m_pcmEngine.SetDopMode(dop);
-    m_newEngineOutput.SetDopMode(dop);
+    m_pcmEngine.SetNativeDsdMode(nativeDsd);
+    out().SetDopMode(dop);
+    m_asioOutput.SetNativeDsdMode(m_useAsio && nativeDsd);
     const bool opened = m_pcmEngine.Open(filePath.toStdWString(), extLower);
     m_pcmEngine.SetDopMode(false);   // 次の曲は明示的に指定されない限りPCM
+    m_pcmEngine.SetNativeDsdMode(false);
+    if (opened && nativeDsd && !m_pcmEngine.IsNativeDsd()) {   // 念のため：ネイティブで開けていなければ失敗扱い
+        m_pcmEngine.Close();
+        m_asioOutput.SetNativeDsdMode(false);
+        return false;
+    }
     if (opened && dop && !m_pcmEngine.IsDop()) {   // 念のため：DoPで開けていなければ失敗扱い
         m_pcmEngine.Close();
-        m_newEngineOutput.SetDopMode(false);
+        out().SetDopMode(false);
         return false;
     }
     if (!opened) {
-        m_newEngineOutput.SetDopMode(false);
-        m_lastEngineError = QString::fromUtf8("この形式・内容のファイルには対応していません");
+        out().SetDopMode(false);
+        m_lastEngineError = QObject::tr("この形式・内容のファイルには対応していません");
         return false;
     }
     // v10: 手動ビットパーフェクトのビット数を優先（なければ自動）
-    m_newEngineOutput.SetPreferredBits(m_manualRateOverride ? m_pinBits : 0);
+    out().SetPreferredBits(m_manualRateOverride ? m_pinBits : 0);
 
     // ★ アップサンプリング(dsd8/hires4)：ネイティブ（原音）レートを基に
     //   目標レートを決定し、PcmDualEngine側のSincResamplerへ反映する。
@@ -511,12 +534,12 @@ bool Player::tryPlayViaNewEngineImpl(const QString &filePath, bool dop)
     const uint32_t nativeRate = m_pcmEngine.GetNativeSampleRate();
     // ★ v10: 共有モードで鳴らしている機器は、Windowsの「既定の形式」が途中で
     //   変更されていても追従できるよう、開くたびにレートを問い合わせ直す。
-    if (m_deviceSharedMode) {
+    if (m_deviceSharedMode && !m_useAsio) {
         const uint32_t mr = m_newEngineOutput.QueryMixRate();
         if (mr > 0) m_deviceFixedRate = mr;
     }
     // ★ v10: DoPはDSDレート/16のまま（リサンプル不可）
-    const uint32_t targetRate = dop ? nativeRate : computeNewEngineTargetRate(nativeRate);
+    const uint32_t targetRate = bitExact ? nativeRate : computeNewEngineTargetRate(nativeRate);
 
     // ★ v10: 出力デバイスが目標レート（例：疑似DSD×8の352.8kHz）に排他モードで
     //   対応していない場合、以前はそのままmpvへ逃げていた。今は半分ずつ
@@ -524,11 +547,12 @@ bool Player::tryPlayViaNewEngineImpl(const QString &filePath, bool dop)
     //   自動で選ぶ。最後はネイティブ（原音）レート。
     // ★ v10: 前回までに「この機器は特定のレート／共有モードでしか鳴らない」と
     //   わかっていれば、最初からその形で開く（ギャップレス判定とも一致させる）。
-    m_newEngineOutput.SetSharedMode(dop ? false : m_deviceSharedMode);   // DoPは排他モードのみ
+    if (!m_useAsio)   // ASIOには共有モードは無い
+        m_newEngineOutput.SetSharedMode(dop ? false : m_deviceSharedMode);   // DoPは排他モードのみ
 
     QList<uint32_t> candidates;
     candidates << targetRate;
-    if (m_deviceFixedRate == 0 && !dop) {   // DoPはレートを下げられない
+    if ((m_deviceFixedRate == 0 || m_useAsio) && !bitExact) {   // DoP/ネイティブDSDはレートを下げられない
         for (uint32_t r = targetRate / 2; r > nativeRate && r >= 44100; r /= 2)
             candidates << r;
         if (!candidates.contains(nativeRate)) candidates << nativeRate;
@@ -549,7 +573,7 @@ bool Player::tryPlayViaNewEngineImpl(const QString &filePath, bool dop)
     //   ① 機器本来の形式（Windowsの「既定の形式」）のレートで、排他モードを試す。
     //   ② それも断られたら、共有モードで鳴らす（レートは同じく既定の形式に合わせ、
     //      周波数変換はAlways Engine自身のリサンプラーで行う）。
-    if (initResult != AudioBackendResult::Ok && !dop) {   // DoPは共有モード等へは逃がさない（PCM変換へ）
+    if (initResult != AudioBackendResult::Ok && !bitExact && !m_useAsio) {   // DoPは共有モード等へは逃がさない（PCM変換へ）。ASIOは対象外
         // 他のアプリがDACを使っていて排他を取れなかっただけなら、共有モードで
         // 鳴らすのはこの曲だけにする（次の曲では改めて排他モードを試す）。
         const bool deviceBusy = (m_newEngineOutput.GetLastHr() == AUDCLNT_E_DEVICE_IN_USE);
@@ -569,23 +593,26 @@ bool Player::tryPlayViaNewEngineImpl(const QString &filePath, bool dop)
             }
         }
     }
-    fmt = m_newEngineOutput.GetActualFormat();
+    fmt = out().GetActualFormat();
     fmt.sampleRate = m_pcmEngine.GetSampleRate();
     if (initResult != AudioBackendResult::Ok) {
         m_lastEngineError = (initResult == AudioBackendResult::FormatNotSupported)
-            ? QString::fromUtf8("出力デバイスがこの形式に対応していません")
-            : QString::fromUtf8("出力デバイスを開けませんでした（他のアプリが使用中の可能性があります）");
+            ? QObject::tr("出力デバイスがこの形式に対応していません")
+            : QObject::tr("出力デバイスを開けませんでした（他のアプリが使用中の可能性があります）");
         // ★ 排他モード確保失敗などの場合、呼び出し側でmpv経路にフォールバックする。
         //   Initialize()が途中まで成功していた場合（IAudioClient::Initializeで
         //   排他ロックを確保した後、SetEventHandle等で失敗した場合など）に
         //   デバイスのロックが残ってしまわないよう、必ずShutdown()で完全に解放する。
-        m_newEngineOutput.Shutdown();
+        if (m_useAsio && !m_asioOutput.LastError().empty())
+            m_lastEngineError = QString::fromUtf8("ASIO: ") + QString::fromStdString(m_asioOutput.LastError());
+        out().Shutdown();
         m_pcmEngine.Close();
-        m_newEngineOutput.SetDopMode(false);
+        out().SetDopMode(false);
+        m_asioOutput.SetNativeDsdMode(false);
         return false;
     }
 
-    m_pcmEngine.AttachOutputBackend(&m_newEngineOutput);
+    m_pcmEngine.AttachOutputBackend(&out());
 
     // ★ DSPチェーン。現在の中密度チェーン/HP補正/音場/ラウドネス正規化設定を
     //   反映してからコールバックとして接続する。m_dspOffがtrueの間は
@@ -599,13 +626,13 @@ bool Player::tryPlayViaNewEngineImpl(const QString &filePath, bool dop)
     m_newEngineDsp.SetLoudnessOn(m_mode == "loudness");
 
     m_newEngineProcessThread = std::make_unique<AudioProcessThread>(
-        m_pcmEngine.GetRingBuffer(), &m_newEngineOutput);
+        m_pcmEngine.GetRingBuffer(), &out());
     m_newEngineProcessThread->SetDspCallback([this](float *buf, size_t n){
         m_newEngineDsp.Process(buf, n);
     });
     // ★ v10: DoPは値を1bitも変えてはいけないので、DSP・音量を完全にバイパスする
-    m_newEngineProcessThread->SetBitPerfect(m_dspOff || dop);
-    m_newEngineProcessThread->SetGain(dop ? 1.0 : volumeToGain(m_volume)); // v10: 音量
+    m_newEngineProcessThread->SetBitPerfect(m_dspOff || bitExact);
+    m_newEngineProcessThread->SetGain(bitExact ? 1.0 : volumeToGain(m_volume)); // v10: 音量
     // ★ 真の終端（ギャップレスで次曲へ継続しない、本当のストリーム終端）でのみ、
     //   リングバッファに残った端数フレームをゼロ埋めして出力するための問い合わせ。
     //   ギャップレス遷移中はIsEndOfStream()がfalseのままなので、この端数フラッシュは
@@ -613,8 +640,28 @@ bool Player::tryPlayViaNewEngineImpl(const QString &filePath, bool dop)
     m_newEngineProcessThread->SetEofQuery([this]{ return m_pcmEngine.IsEndOfStream(); });
 
     m_pcmEngine.StartDecoding();
-    m_newEngineOutput.Start();
+    out().Start();
     m_newEngineProcessThread->Start();
+
+    // ★ v10: ASIOの見張り。開始後1.5秒たってもドライバからバッファ要求が1回も来ない場合は、
+    //   ドライバが動いていない（ASIO4ALLで出力先が無効、デバイス未接続など）。
+    //   「再生中」の表示のまま無音で進むのを防ぐため、停止して知らせる。
+    if (m_useAsio) {
+        static int s_asioWatch = 0;          // 開き直すたびに進む（古い見張りは無効にする）
+        const int token = ++s_asioWatch;
+        QTimer::singleShot(1500, this, [this, token] {
+            if (token != s_asioWatch) return;
+            if (!m_useAsio || !m_useNewEngine || !m_playing) return;
+            if (m_asioOutput.CallbackCount() > 0) return;
+            m_asioOutput.Log("WATCHDOG: no callbacks within 1.5s -> stop");
+            stopNewEngine();
+            m_useNewEngine = false;
+            m_playing = false;
+            m_paused  = false;
+            emit playbackStopped();
+            emit errorOccurred(QObject::tr("ASIOドライバから応答がありません。ASIOの設定で出力先のデバイスが有効になっているか確認してください。"));
+        });
+    }
 
     // ★ 長さはネイティブ（原音）のフレーム数／ネイティブレートで計算する
     //   （fmt.sampleRateはリサンプル後の目標レートのため、これで割ると
@@ -658,14 +705,14 @@ bool Player::tryInitOutput(uint32_t rate, AudioBackendResult &result)
     fmt.sampleFormat = AudioSampleFormat::Int32;
     for (int attempt = 0; attempt < 4; ++attempt) {
         if (attempt > 0) {
-            m_newEngineOutput.Shutdown();
+            out().Shutdown();
             QThread::msleep(50);
         }
-        result = m_newEngineOutput.Initialize(fmt);
+        result = out().Initialize(fmt);
         if (result == AudioBackendResult::Ok) return true;
         if (result == AudioBackendResult::FormatNotSupported) break;
     }
-    m_newEngineOutput.Shutdown();
+    out().Shutdown();
     return false;
 }
 
@@ -681,7 +728,7 @@ uint32_t Player::computeNewEngineTargetRate(uint32_t nativeRate) const
     if (nativeRate == 0) return nativeRate;
     // ★ v10: 機器が特定のレートしか受け付けない（Bluetooth等）とわかっていれば、
     //   常にそのレートへ変換して出す。
-    if (m_deviceFixedRate > 0) return m_deviceFixedRate;
+    if (m_deviceFixedRate > 0 && !m_useAsio) return m_deviceFixedRate;
     // ★ v10: 手動ビットパーフェクトで出力レートが指定されていれば、それが最優先
     //   （デバイスが受け付けなければ半分ずつ下げる）。
     if (m_manualRateOverride && m_pinRate > 0) {
@@ -754,8 +801,8 @@ void Player::stopNewEngine()
         m_newEngineProcessThread->Stop();
         m_newEngineProcessThread.reset();
     }
-    m_newEngineOutput.Stop();
-    m_newEngineOutput.Shutdown();
+    out().Stop();
+    out().Shutdown();
     m_pcmEngine.StopDecoding();
     m_pcmEngine.Close();
 }
@@ -800,7 +847,7 @@ void Player::pause()
         //   出力がまだ動いている（リングが捌ける）うちに、処理スレッドを先に止める。
         if (m_newEngineProcessThread) m_newEngineProcessThread->Stop();
         m_pcmEngine.StopDecoding();
-        m_newEngineOutput.Stop();
+        out().Stop();
         m_playing = false;
         m_paused  = true;
         emit playbackPaused();
@@ -812,7 +859,7 @@ void Player::resume()
 {
     if (m_useNewEngine) {
         if (m_paused) {
-            m_newEngineOutput.Start();
+            out().Start();
             m_pcmEngine.StartDecoding();
             // ★ v10修正：pause()で止めた処理スレッドを再開する
             if (m_newEngineProcessThread) m_newEngineProcessThread->Start();
@@ -917,7 +964,8 @@ void Player::onDefaultDeviceChangedRaw(const char *source)
               .arg(static_cast<int>(info.kind))
               .arg(int(m_playing)).arg(int(m_paused)).arg(int(m_useNewEngine)));
 
-    if (m_playing || m_paused) {
+    // ★ v10: ASIOで鳴らしている間は、Windowsの既定デバイスの切替は出力先に関係しない
+    if ((m_playing || m_paused) && !m_useAsio) {
         stopNewEngine();          // WASAPI排他デバイスを解放
         m_useNewEngine = false;
         m_playing = false;
@@ -940,9 +988,8 @@ void Player::onDefaultDeviceSettled()
     QMessageBox box(QApplication::activeWindow());
     box.setIcon(QMessageBox::Warning);   // ⚠ 黄色アイコンで音量注意を目立たせる
     box.setWindowTitle(QStringLiteral("Always Player"));
-    box.setText(QStringLiteral("出力先が切り替わったため、Always Playerを停止しました。"));
-    box.setInformativeText(QStringLiteral("出力先によって音量が大きく変わることがあります。\n"
-                                          "再生する前に、DACやアンプの音量を下げてから再生してください。"));
+    box.setText(QObject::tr("出力先が切り替わったため、Always Playerを停止しました。"));
+    box.setInformativeText(QObject::tr("出力先によって音量が大きく変わることがあります。\n再生する前に、DACやアンプの音量を下げてから再生してください。"));
     box.setStandardButtons(QMessageBox::Ok);
     box.setWindowFlag(Qt::WindowStaysOnTopHint, true);
 
@@ -1123,6 +1170,8 @@ int Player::peekNextIndexFrom(int baseIndex) const
 //   末尾数秒分を切り捨てて次曲へ進んでしまうため、必ず両方確認する。
 void Player::checkNewEngineEof()
 {
+    // ★ v10: ASIOドライバからのリセット要求（設定画面でのバッファ変更・デバイスの抜き差し等）
+    if (m_useAsio && m_asioOutput.ConsumeResetRequest()) { handleAsioReset(); return; }
     if (!m_useNewEngine || !m_playing) return;
     if (m_newEngineEofFired) return;
 
@@ -1132,7 +1181,7 @@ void Player::checkNewEngineEof()
     // ★ v10: エンジン側リングが空でも、WASAPI出力側の内部リングにはまだ
     //   数十ms分の音が残っている。これが鳴り終わるまで待たないと、曲尾が
     //   切れ、シークバーも最後まで伸びきらないまま次曲へ進んでしまう。
-    if (m_newEngineOutput.GetQueuedFrames() > 0) return;
+    if (out().GetQueuedFrames() > 0) return;
 
     m_newEngineEofFired = true;
 
@@ -1147,7 +1196,7 @@ void Player::checkNewEngineEof()
     int delayMs = 120;
     const uint32_t outSr = static_cast<uint32_t>(m_newEngineOutputSr);
     if (outSr > 0)
-        delayMs += static_cast<int>(1000ULL * m_newEngineOutput.GetBufferSize() / outSr);
+        delayMs += static_cast<int>(1000ULL * out().GetBufferSize() / outSr);
 
     qDebug() << "[Gapless] FALLBACK REOPEN PATH: checkNewEngineEof fired next() "
                 "(gapless was NOT consumed for this boundary) delayMs=" << delayMs;
@@ -1211,8 +1260,9 @@ void Player::tryPrepareGaplessNext(const QString &nextPath)
     if (!NEW_ENGINE_EXT.contains(ext)) return; // mpv経路の曲へは継ぎ目なし非対応
     // ★ v10: DoPの曲の前後はギャップレスにしない（DoPとPCMでは、音量・DSPの扱いも
     //   データの意味も違うため、同じストリームに続けて流すとノイズになる）。
-    if (m_pcmEngine.IsDop()) return;
-    if (m_dopEnabled && (ext == "dsf" || ext == "dff") && !m_deviceSharedMode) return;
+    if (m_pcmEngine.IsBitExactDsd()) return;
+    if (m_dopEnabled && (ext == "dsf" || ext == "dff") && (m_useAsio || !m_deviceSharedMode)) return;
+    if (m_useAsio && (ext == "dsf" || ext == "dff")) return;   // ASIOではネイティブDSDになりうる
 
     const std::string extLower = ext.toStdString();
     PcmDualEngine::GaplessInfo info = m_pcmEngine.PrepareGaplessNext(nextPath.toStdWString(), extLower);
@@ -1459,7 +1509,7 @@ void Player::setVolume(int vol)
     m_volume = qBound(0, vol, 100);
     // ★ v10: DoP中は音量をかけられない（かけるとDSDが壊れて大音量ノイズになる）。
     //   音量はDAC側で調整してもらう。
-    if (m_newEngineProcessThread && !m_pcmEngine.IsDop())
+    if (m_newEngineProcessThread && !m_pcmEngine.IsBitExactDsd())
         m_newEngineProcessThread->SetGain(volumeToGain(m_volume));
 }
 
@@ -1474,7 +1524,8 @@ void Player::setDopDevices(const QStringList &ids)
 //   （出力先が変わったときは再生自体が止まるので、ここでは設定とメニュー表示だけ）
 void Player::refreshDopForCurrentDevice()
 {
-    const bool on = !m_currentDeviceId.isEmpty() && m_dopDevices.contains(m_currentDeviceId);
+    const QString key = outputKey();
+    const bool on = !key.isEmpty() && m_dopDevices.contains(key);
     if (on == m_dopEnabled) return;
     m_dopEnabled = on;
     emit dopStateChanged(on);
@@ -1482,9 +1533,10 @@ void Player::refreshDopForCurrentDevice()
 
 void Player::setDopEnabled(bool on)
 {
-    if (!m_currentDeviceId.isEmpty()) {
-        if (on) m_dopDevices.insert(m_currentDeviceId);
-        else    m_dopDevices.remove(m_currentDeviceId);
+    const QString key = outputKey();
+    if (!key.isEmpty()) {
+        if (on) m_dopDevices.insert(key);
+        else    m_dopDevices.remove(key);
     }
     if (m_dopEnabled == on) return;
     m_dopEnabled = on;
@@ -1655,10 +1707,20 @@ QString Player::getInfo(const QString &mode) const
     //   手動ビットパーフェクトで出力形式を指定した場合に、表示が食い違っていた）。
     if (m_useNewEngine && m_newEngineOutputSr > 0) {
         outKhz  = m_newEngineOutputSr / 1000.0;
-        outBits = m_newEngineOutput.GetValidBits();
+        outBits = out().GetValidBits();
+        // ネイティブDSDは、1bitサンプルのレート（例：2822.4kHz）を表示する
+        if (m_pcmEngine.IsNativeDsd()) outKhz = m_newEngineOutputSr * 8.0 / 1000.0;
     }
     if (outKhz > 0)
         info += QString(" | %1 kHz").arg(outKhz, 0, 'f', 1);
+    // ★ v10: ASIOで出力中はそれとわかる表示にする
+    if (m_useNewEngine && m_useAsio) info += QStringLiteral(" / ASIO");
+    // ★ v10: ネイティブDSDは「Native DSD64」のように表示
+    if (m_useNewEngine && m_pcmEngine.IsNativeDsd() && m_newEngineOutputSr > 0) {
+        const int base = (m_newEngineOutputSr % 44100 == 0) ? 44100 : 48000;
+        info += QString(" / Native DSD%1").arg(m_newEngineOutputSr * 8 / base);
+        return info;
+    }
     // ★ v10: DoP出力中は「DoP DSD64」のように表示
     if (m_useNewEngine && m_pcmEngine.IsDop() && m_newEngineOutputSr > 0) {
         const int base = (m_newEngineOutputSr % 44100 == 0) ? 44100 : 48000;
@@ -1667,7 +1729,7 @@ QString Player::getInfo(const QString &mode) const
     }
     // v10: 共有モード（Bluetoothなど）はビット数ではなく「共有モード」と表示
     if (isSharedOutput())
-        info += QString::fromUtf8(" / 共有モード");
+        info += QObject::tr(" / 共有モード");
     else
         info += QString(" / %1bit").arg(outBits);
     return info;
@@ -1676,171 +1738,28 @@ QString Player::getInfo(const QString &mode) const
 QString Player::getCoverArt() const
 {
     if (m_currentIndex >= m_playlist.size()) return {};
-    QString fp = m_playlist[m_currentIndex];
+    const QString fp = m_playlist[m_currentIndex];
     // ★ CD再生中はアートなし
     if (fp.startsWith("cdda://")) return {};
-    QFileInfo fi(fp);
-    QString ext = fi.suffix().toLower();
 
-    QByteArray imgData;
-    QString    imgMime;
-
-    auto normalizeMime = [](const QString &m) {
-        QString mm = m.toLower();
-        if (mm.contains("png")) return QString("image/png");
-        if (mm.contains("jpg") || mm.contains("jpeg") || mm.contains("jpe") || mm.contains("jfif"))
-            return QString("image/jpeg");
-        return QString("image/jpeg"); // デフォルト
-    };
-
-    // ───────────────────────────────────────────────
-    // MP3: APIC を全列挙し、Front Cover を優先
-    // ───────────────────────────────────────────────
-    if (ext == "mp3") {
-        TagLib::MPEG::File f(fp.toStdWString().c_str());
-        if (f.ID3v2Tag()) {
-            auto frames = f.ID3v2Tag()->frameListMap()["APIC"];
-
-            TagLib::ID3v2::AttachedPictureFrame *best = nullptr;
-
-            for (auto *fr : frames) {
-                auto *apic = dynamic_cast<TagLib::ID3v2::AttachedPictureFrame*>(fr);
-                if (!apic) continue;
-
-                // type=3 が Front Cover
-                if (apic->type() == TagLib::ID3v2::AttachedPictureFrame::FrontCover) {
-                    best = apic;
-                    break;
-                }
-
-                // description に front が含まれる場合も優先
-                QString desc = QString::fromUtf8(apic->description().toCString(true)).toLower();
-                if (desc.contains("front")) {
-                    best = apic;
-                }
-
-                // fallback として最初の1枚
-                if (!best) best = apic;
-            }
-
-            if (best) {
-                imgData = QByteArray(best->picture().data(), best->picture().size());
-                imgMime = normalizeMime(QString::fromStdString(best->mimeType().to8Bit()));
-            }
-        }
-    }
-
-    // ───────────────────────────────────────────────
-    // WAV: ID3v2タグのAPICを取得
-    // ───────────────────────────────────────────────
-    else if (ext == "wav") {
-        TagLib::RIFF::WAV::File f(fp.toStdWString().c_str());
-        if (f.hasID3v2Tag() && f.ID3v2Tag()) {
-            auto frames = f.ID3v2Tag()->frameListMap()["APIC"];
-            TagLib::ID3v2::AttachedPictureFrame *best = nullptr;
-            for (auto *fr : frames) {
-                auto *apic = dynamic_cast<TagLib::ID3v2::AttachedPictureFrame*>(fr);
-                if (!apic) continue;
-                if (apic->type() == TagLib::ID3v2::AttachedPictureFrame::FrontCover) { best = apic; break; }
-                if (!best) best = apic;
-            }
-            if (best) {
-                imgData = QByteArray(best->picture().data(), best->picture().size());
-                imgMime = normalizeMime(QString::fromStdString(best->mimeType().to8Bit()));
-            }
-        }
-    }
-
-    // ───────────────────────────────────────────────
-    // FLAC: PictureType=3（Front Cover）を優先
-    // ───────────────────────────────────────────────
-    else if (ext == "flac") {
-        TagLib::FLAC::File f(fp.toStdWString().c_str());
-        if (!f.pictureList().isEmpty()) {
-            TagLib::FLAC::Picture *best = nullptr;
-
-            for (auto *pic : f.pictureList()) {
-                if (pic->type() == TagLib::FLAC::Picture::FrontCover) {
-                    best = pic;
-                    break;
-                }
-                if (!best) best = pic;
-            }
-
-            if (best) {
-                imgData = QByteArray(best->data().data(), best->data().size());
-                imgMime = normalizeMime(QString::fromStdString(best->mimeType().to8Bit()));
-            }
-        }
-    }
-
-    // ───────────────────────────────────────────────
-    // MP4/M4A: covr を複数対応
-    // ───────────────────────────────────────────────
-    else if (ext == "m4a" || ext == "mp4" || ext == "aac") {
-        TagLib::MP4::File f(fp.toStdWString().c_str());
-        if (f.tag()) {
-            auto items = f.tag()->itemMap();
-            if (items.contains("covr")) {
-                auto covers = items["covr"].toCoverArtList();
-                if (!covers.isEmpty()) {
-                    auto c = covers.front();
-                    imgData = QByteArray(c.data().data(), c.data().size());
-                    imgMime = "image/jpeg"; // MP4 はほぼ JPEG
-                }
-            }
-        }
-    }
-
-    // ───────────────────────────────────────────────
-    // 埋め込み画像があれば一時ファイルに書き出す
-    // ───────────────────────────────────────────────
-    if (!imgData.isEmpty()) {
-        QString ext2 = imgMime.contains("png") ? ".png" : ".jpg";
-
-        // キャッシュ対策：ファイルパスのハッシュを使う
-        QString hash = QString::number(qHash(fp));
-        QString tmp  = QDir::tempPath() + "/always_cover_" + hash + ext2;
-
+    // ★ v10: 探す順番は AlbumArt にまとめた（埋め込み → フォルダの画像 → ネット取得のキャッシュ）
+    // 1. 埋め込み画像は一時ファイルに書き出して、そのパスを返す
+    const QByteArray img = AlbumArt::embedded(fp);
+    if (!img.isEmpty()) {
+        const QString tmp = QDir::tempPath() + "/always_cover_" + QString::number(qHash(fp))
+                          + AlbumArt::extensionFor(img);
         QFile tf(tmp);
         if (tf.open(QIODevice::WriteOnly)) {
-            tf.write(imgData);
+            tf.write(img);
             tf.close();
             return tmp;
         }
     }
-
-    // ───────────────────────────────────────────────
-    // フォルダ画像 fallback（あなたの現行コードをそのまま活かす）
-    // ───────────────────────────────────────────────
-    QDir dir = fi.absoluteDir();
-    static const QStringList candidates = {
-        "cover.jpg","cover.png","cover.webp","cover.bmp",
-        "Cover.jpg","Cover.png","Cover.webp",
-        "folder.jpg","folder.png","folder.webp","Folder.jpg",
-        "front.jpg","front.png","Front.jpg",
-        "artwork.jpg","artwork.png","Artwork.jpg",
-        "AlbumArt.jpg","AlbumArt.png","albumart.jpg",
-        "thumb.jpg","thumb.png","Thumb.jpg",
-        "image.jpg","image.png","Image.jpg",
-        "album.jpg","album.png","Album.jpg",
-    };
-    for (const auto &name : candidates) {
-        QString path = dir.absoluteFilePath(name);
-        if (QFile::exists(path)) return path;
-    }
-
-    dir.setNameFilters({
-        "*.jpg","*.jpeg","*.png","*.webp",
-        "*.bmp","*.tiff","*.tif","*.gif",
-        "*.JPG","*.JPEG","*.PNG","*.WEBP",
-        "*.BMP","*.TIFF","*.GIF"
-    });
-    dir.setFilter(QDir::Files);
-    auto list = dir.entryInfoList();
-    if (!list.isEmpty()) return list.first().absoluteFilePath();
-
-    return {};
+    // 2. フォルダの画像ファイル
+    const QString folder = AlbumArt::folderImage(QFileInfo(fp).absolutePath());
+    if (!folder.isEmpty()) return folder;
+    // 3. 以前ネットから取得して保存しておいた画像
+    return AlbumArt::cachedFor(fp);
 }
 
 QString Player::currentFile() const
@@ -1877,9 +1796,74 @@ void Player::getAudioLevels(float &left, float &right) const
     //   「DACへ渡した瞬間の実レベル」を使う。排他モードの音はループバックで
     //   取れず、mpvも止まっているため、従来の方法では針が動かなかった。
     if (m_useNewEngine) {
-        if (m_playing) m_newEngineOutput.GetLevels(left, right);
+        if (m_playing) out().GetLevels(left, right);
         else left = right = 0.f;
         return;
     }
     left = right = 0.f;
+}
+
+// ─────────────────────────────────────────────────────────
+// ★ v10: 出力方式（WASAPI排他 / ASIO）
+// ─────────────────────────────────────────────────────────
+// ★ v10: 出力の一覧に出すのは、メーカー製のASIOドライバだけ。
+//   ASIO4ALL・FlexASIO・ASIO2WASAPIなど、Windowsのドライバ（WDM/KS・WASAPI）を包むタイプは
+//   経路が1段増えるだけでWASAPI排他より有利な点がなく、実機では高いサンプルレートで
+//   ノイズが出た（バッファを最大にすれば消えるが、既定のままでは使えない）。
+//   「無駄な経路をなくす」方針に合わせ、一覧から外す。以前これらを選んでいた場合は、
+//   起動時の復元で見つからず、自動的にWASAPI排他に戻る。
+static bool isWdmWrapperAsio(const QString &name)
+{
+    static const char *const kWrappers[] = {
+        "ASIO4ALL", "FlexASIO", "ASIO2WASAPI", "ASIO2KS", "Generic Low Latency ASIO"
+    };
+    for (const char *w : kWrappers)
+        if (name.contains(QLatin1String(w), Qt::CaseInsensitive)) return true;
+    return false;
+}
+
+QStringList Player::asioDrivers()
+{
+    QStringList list;
+    for (const std::wstring &n : AsioOutput::EnumerateDrivers()) {
+        const QString name = QString::fromStdWString(n);
+        if (!isWdmWrapperAsio(name)) list << name;
+    }
+    return list;
+}
+
+void Player::setOutputBackend(bool useAsio, const QString &driver)
+{
+    // ★ v10: ASIOの診断ログ（exeと同じフォルダの asio_debug.log）。
+    //   配布版では書かない（Program Files配下は書き込み不可のうえ、利用者には不要なため）。
+    //   調査時は ALWAYS_ASIO_LOG を定義してビルドする（device_debug.log の ALWAYS_DEVICE_LOG と同じ方式）。
+#ifdef ALWAYS_ASIO_LOG
+    m_asioOutput.SetLogPath((QCoreApplication::applicationDirPath() + "/asio_debug.log").toStdWString());
+#endif
+    const std::wstring drv = driver.toStdWString();
+    if (useAsio == m_useAsio && (!useAsio || drv == m_asioOutput.DriverName())) return;
+
+    const bool wasActive = m_useNewEngine && (m_playing || m_paused);
+    // 今の出力を先に止める（切替後のout()は新しい出力を指すため、ここで旧出力を解放）
+    stopNewEngine();
+    if (m_useAsio) m_asioOutput.Unload();
+
+    m_useAsio = useAsio;
+    if (useAsio) m_asioOutput.SetDriverName(drv);
+    m_unsupportedOutRates.clear();
+    refreshDopForCurrentDevice();   // DoP設定は出力（機器）ごと
+    deviceLog(QStringLiteral("output backend -> %1").arg(useAsio ? QStringLiteral("ASIO: ") + driver : QStringLiteral("WASAPI")));
+
+    if (wasActive) reloadNewEngineForRateChange();   // 同じ位置から鳴らし直す
+}
+
+// ASIOドライバが「リセットしてほしい」と要求してきたときの処理。
+// ドライバを読み込み直し、再生中なら同じ位置から鳴らし直す。
+void Player::handleAsioReset()
+{
+    const bool wasActive = m_useNewEngine && (m_playing || m_paused);
+    deviceLog(QStringLiteral("ASIO reset request (active=%1)").arg(int(wasActive)));
+    stopNewEngine();
+    m_asioOutput.Unload();
+    if (wasActive) reloadNewEngineForRateChange();
 }

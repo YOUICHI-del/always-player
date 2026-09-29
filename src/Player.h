@@ -20,6 +20,7 @@
 #include <taglib/wavfile.h>
 #include "PcmDualEngine.h"
 #include "WasapiExclusiveOutput.h"
+#include "AsioOutput.h"
 #include "AudioProcessThread.h"
 #include "DspChain.h"
 #include "AudioDeviceWatcher.h"
@@ -52,6 +53,8 @@ public:
     QStringList dopDevices() const { return QStringList(m_dopDevices.begin(), m_dopDevices.end()); }
     bool dopEnabled() const { return m_dopEnabled; }
     bool dopActive()  const { return m_useNewEngine && m_pcmEngine.IsDop(); }
+    // ★ v10: ネイティブDSD（ASIOのDSDモード）で再生中か
+    bool nativeDsdActive() const { return m_useNewEngine && m_pcmEngine.IsNativeDsd(); }
     void setMode(const QString &mode, bool hp1 = false, bool hp2 = false, const QString &soundField = QString());
     void setModeQuiet(const QString &mode) { m_mode = mode; }
     void setDspOff(bool off);   // DSP完全バイパス（SAEC・高調波・アップサンプリングすべて無効）
@@ -81,9 +84,18 @@ public:
     //  （両者を混同するとgetInfo()側のhiRes判定が循環してしまうため）。
     uint32_t newEngineActualSampleRate() const { return static_cast<uint32_t>(m_newEngineOutputSr); }
     // v10: 元の音源のビット数ではなく、実際にDACへ出しているビット数（16/24/32）
-    uint32_t newEngineActualBits() const { return m_newEngineOutput.GetValidBits(); }
+    uint32_t newEngineActualBits() const { return out().GetValidBits(); }
     // v10: 共有モード（Bluetoothなど）で鳴らしているか。表示用。
-    bool isSharedOutput() const { return m_useNewEngine && m_newEngineOutput.IsSharedMode(); }
+    bool isSharedOutput() const { return m_useNewEngine && !m_useAsio && m_newEngineOutput.IsSharedMode(); }
+    // ★ v10: 出力方式。useAsio=falseでWASAPI排他（標準）、trueでASIO（driverは登録名）。
+    //   再生中に切り替えた場合は、同じ位置から新しい出力で鳴らし直す。
+    void setOutputBackend(bool useAsio, const QString &driver);
+    bool usingAsio() const { return m_useAsio; }
+    QString asioDriverName() const { return QString::fromStdWString(m_asioOutput.DriverName()); }
+    static QStringList asioDrivers();
+    bool openAsioControlPanel() { return m_useAsio && m_asioOutput.ControlPanel(); }
+    // ASIOドライバのinit()に渡すウィンドウ（メイン画面）。ドライバの読み込み前に設定する。
+    void setAsioSysHandle(void *hwnd) { m_asioOutput.SetSysHandle(hwnd); }
 
     // ★ シーク：新エンジン再生中はPcmDualEngine::Seek()、それ以外はmpvの
     //   time-posプロパティへ委譲する。
@@ -141,7 +153,7 @@ private:
     // 排他モード確保失敗・未対応フォーマットなど何らかの理由で開始できなければ
     // falseを返し、呼び出し側は従来通りmpv経路にフォールバックする。
     bool tryPlayViaNewEngine(const QString &filePath);
-    bool tryPlayViaNewEngineImpl(const QString &filePath, bool dop); // v10: DoP対応の本体
+    bool tryPlayViaNewEngineImpl(const QString &filePath, bool dop, bool nativeDsd = false); // v10: DoP／ネイティブDSD対応の本体
     void stopNewEngine();
     void checkNewEngineEof();  // 新エンジン再生中のEOFポーリング（タイマー）
 
@@ -225,6 +237,14 @@ private:
 
     PcmDualEngine                       m_pcmEngine;
     WasapiExclusiveOutput                m_newEngineOutput;
+    // ★ v10: ASIO出力。m_useAsioがtrueの間は、こちらを使う（out()で切り替え）。
+    AsioOutput                           m_asioOutput;
+    bool                                 m_useAsio = false;
+    IAudioOutputBackend&       out()       { return m_useAsio ? static_cast<IAudioOutputBackend&>(m_asioOutput) : m_newEngineOutput; }
+    const IAudioOutputBackend& out() const { return m_useAsio ? static_cast<const IAudioOutputBackend&>(m_asioOutput) : m_newEngineOutput; }
+    // DoP設定などを「機器ごと」に記憶するときのキー（ASIOはドライバ名、WASAPIはWindowsの既定デバイスID）
+    QString outputKey() const { return m_useAsio ? QStringLiteral("asio:") + QString::fromStdWString(m_asioOutput.DriverName()) : m_currentDeviceId; }
+    void handleAsioReset();
     std::unique_ptr<AudioProcessThread>  m_newEngineProcessThread;
     QElapsedTimer                        m_newEngineElapsedTimer;
     double                               m_newEnginePositionBase = 0.0;

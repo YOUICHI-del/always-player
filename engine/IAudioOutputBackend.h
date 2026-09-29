@@ -45,4 +45,16 @@ public:
 
     virtual void Shutdown() = 0;
     virtual const char* GetBackendName() const = 0;
+
+    // ★ v10: WASAPI排他とASIOを同じように扱うための共通機能（既定は「何もしない」）。
+    //   内部リングにまだ残っている（これから鳴る）フレーム数
+    virtual uint32_t GetQueuedFrames() const { return 0; }
+    //   デバイスと合意した有効ビット数（表示用）
+    virtual uint16_t GetValidBits() const { return 24; }
+    //   VUメーター用の現在レベル（RMS、0〜1）
+    virtual void GetLevels(float& left, float& right) const { left = right = 0.f; }
+    //   DoP出力（値をビット単位で保つ）。24bit以上の整数形式でしか開かない
+    virtual void SetDopMode(bool) {}
+    //   手動ビットパーフェクトで優先する有効ビット数（0=自動）
+    virtual void SetPreferredBits(int) {}
 };

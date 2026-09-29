@@ -10,13 +10,13 @@ TrayManager::TrayManager(QObject *parent) : QObject(parent)
 
     m_menu = new QMenu();
 
-    QAction *actShow = new QAction("Always を開く", m_menu);
+    QAction *actShow = new QAction(QObject::tr("Always を開く"), m_menu);
     connect(actShow, &QAction::triggered, this, &TrayManager::showRequested);
 
-    QAction *actFolder = new QAction("フォルダを選択して再生", m_menu);
+    QAction *actFolder = new QAction(QObject::tr("フォルダを選択して再生"), m_menu);
     connect(actFolder, &QAction::triggered, this, &TrayManager::folderRequested);
 
-    QAction *actQuit = new QAction("終了", m_menu);
+    QAction *actQuit = new QAction(QObject::tr("終了"), m_menu);
     connect(actQuit, &QAction::triggered, this, &TrayManager::quitRequested);
 
     m_menu->addAction(actShow);

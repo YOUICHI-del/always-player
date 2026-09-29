@@ -94,7 +94,8 @@ void RemoteServer::onNewConnection()
         sendLine(s, QJsonObject{
             {"type", "hello"},
             {"app", "Always Player"},
-            {"version", "9.0.0"},
+            {"version", "10.0.0"},
+            {"proto", kProtocolVersion},   // v10: スマホ側が「v10の機能が使えるか」を判断する番号
 #ifdef BUILD_TIMESTAMP
             {"build", BUILD_TIMESTAMP},   // どのビルドのexeが動いているかの確認用
 #endif

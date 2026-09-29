@@ -14,6 +14,8 @@
 #include <QGridLayout>
 #include <QInputDialog>
 #include <QJsonObject>
+#include <QSet>
+#include <QHash>
 #include <memory>
 #include "Player.h"
 #include "VUMeter.h"
@@ -73,6 +75,7 @@ private:
                               bool bpOn = false, int bpRate = 0, int bpBits = 0);
     void loadFavorites();
     void updateJacket();
+    void requestOnlineCover(const QString &audioFile);   // ★ v10: ジャケット画像のネット取得
     void updateModeDesc(const QString &mode);
     void turnOffBitPerfect();
     void clearCdState();
@@ -90,6 +93,11 @@ private:
     void remoteBrowse(const QString &path);
     void remoteFolderArt(const QString &path);
     void publishRemoteStatus();
+    void remoteSendOutputs();               // v10: 出力方式の一覧をスマホへ
+    QString currentBitPerfectKey() const;   // v10: "auto" または "44100/24"
+    void remoteSendArtistInfo(const QString &artist);   // v10: アーティスト情報をスマホへ
+    QStringList currentArtistList() const;  // 「アーティスト情報」ボタンと同じ分割（複数アーティスト）
+    void applyDspOff(bool off);             // DSP完全バイパス（設定画面・リモコン共通）
 
     Player         *m_player   = nullptr;
     TrayManager    *m_tray     = nullptr;
@@ -190,6 +198,7 @@ private:
     DiscInfo  m_discInfo;
     QString   m_cdDrive;
     bool      m_isCdMode       = false;
+    QSet<QString> m_coverTried;   // ★ v10: このセッションでネット取得を試したアルバム（アーティスト＋アルバム名）
     int       m_cdTrackCount   = 0;
     int       m_cdCurrentTrack = 0;
     bool      m_mciOpen        = false;
@@ -206,6 +215,7 @@ private:
     QTimer         *m_remoteTimer   = nullptr;
     qint64          m_remoteArtKey  = 0;   // 最後に送ったジャケットの QPixmap::cacheKey
     qint64          m_remoteArtId   = 0;   // スマホへ渡す画像番号（送るたびに+1）
+    QHash<QString, QJsonObject> m_remoteArtistCache;   // v10: 調べ済みのアーティスト情報（言語+名前）
 
     // アルバムブラウザ
     QWidget      *m_mainContent      = nullptr;

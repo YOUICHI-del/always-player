@@ -15,7 +15,19 @@
 //               {"cmd":"browse","path":フォルダ}   → folders（""で「今のフォルダの親」から、"::drives"でドライブ一覧）
 //               {"cmd":"folderArt","path":フォルダ} → folderArt（一覧のサムネイル）
 //               {"cmd":"openFolder","path":フォルダ} そのフォルダを読み込んで再生
-//  PC → スマホ  {"type":"hello","app":"Always Player","version":"9.0.0"}
+//  ── v10 で追加（proto=2）──────────────────────────────────────────────
+//               {"cmd":"outputs"}                     → outputs（出力方式の一覧）
+//               {"cmd":"setOutput","key":"wasapi"|"asio:<ドライバ名>"}
+//               {"cmd":"bitperfect","rate":0}         自動（モード連動）
+//               {"cmd":"bitperfect","rate":44100,"bits":24} 16種類の手動指定
+//               {"cmd":"dop","on":true|false}         DoP出力（今の出力デバイスに記憶）
+//                  ※ PC画面の警告ダイアログは出さない（確認はスマホ側で行う）
+//               {"cmd":"chain","on":bool}             中密度チェーン
+//               {"cmd":"soundField","value":""|"wowflutter"|"halltone"}
+//               {"cmd":"dspOff","on":bool}            DSP完全バイパス
+//               {"cmd":"coverOnline","on":bool}       ジャケット画像のネット取得
+//               {"cmd":"artistInfo","artist":名前}     → artistInfo（""で今の曲の1人目）
+//  PC → スマホ  {"type":"hello","app":"Always Player","version":"10.0.0","proto":2}
 //               {"type":"status","state":"playing"|"paused"|"stopped",
 //                "title":..,"artist":..,"index":n,"total":n,
 //                "pos":秒,"dur":秒,"volume":0-100,"cd":bool,"artId":n}
@@ -24,6 +36,16 @@
 //               {"type":"folders","path":..,"parent":..,"title":..,
 //                "items":[{"name":..,"path":..,"tracks":曲数,"sub":サブフォルダ有無}]}
 //               {"type":"folderArt","path":..,"data":"<base64 JPEG>"}（画像なしは空）
+//               v10: status に以下を追加
+//                "info":"FLAC | 2116 kbps | 96 kHz / 24bit"（PC画面の情報欄と同じ）
+//                "output":"BitPerfect 96kHz/24"｜"Native DSD64"｜"共有モード 48kHz" 等
+//                "backend":"wasapi"|"asio:<名前>", "bp":"auto"|"<rate>/<bits>",
+//                "dop":bool（設定）, "dopActive":bool, "nativeDsd":bool（実際の出力）
+//               {"type":"outputs","current":key,"items":[{"key":..,"label":..}]}
+//               {"type":"artistInfo","artists":[..],"artist":..,"loading":bool,"ok":bool,
+//                "name":..,"description":..,"body":本文(文字のみ),"url":..,"lang":..,
+//                "imageSource":..,"image":"<base64 JPEG>"}
+//               status に "chain","soundField","dspOff","coverOnline","hasArtist" も追加
 // ============================================================================
 #include <QObject>
 #include <QJsonObject>
@@ -40,6 +62,7 @@ class RemoteServer : public QObject
 public:
     static constexpr quint16 kTcpPort       = 50505;
     static constexpr quint16 kDiscoveryPort = 50506;
+    static constexpr int     kProtocolVersion = 2;   // v9=1（proto無し）, v10=2
 
     explicit RemoteServer(QObject *parent = nullptr);
     ~RemoteServer() override;

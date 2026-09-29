@@ -62,6 +62,11 @@ public:
     void SetDopMode(bool on) { m_dopMode = on; }
     // 今開いている曲がDoPで出力中か
     bool IsDop() const { return m_isDop; }
+    // ★ v10: 次のOpen()でDSF/DFFをネイティブDSD（ASIOのDSDモード用）で開くか
+    void SetNativeDsdMode(bool on) { m_nativeDsdMode = on; }
+    bool IsNativeDsd() const { return m_isNativeDsd; }
+    // DoPまたはネイティブDSD＝値を1bitも変えてはいけない曲か
+    bool IsBitExactDsd() const { return m_isDop || m_isNativeDsd; }
 
     void AttachOutputBackend(IAudioOutputBackend* backend);
 
@@ -118,6 +123,8 @@ private:
     std::unique_ptr<IPcmDecoder> m_decoder;
     bool     m_dopMode = false;   // v10: 次のOpen()でDSDをDoPで開くか
     bool     m_isDop   = false;   // v10: 今の曲がDoPか
+    bool     m_nativeDsdMode = false;  // v10: 次のOpen()でDSDをネイティブで開くか
+    bool     m_isNativeDsd   = false;  // v10: 今の曲がネイティブDSDか
     uint32_t m_nativeSampleRate = 0;
     uint32_t m_outputSampleRate = 0;
     uint32_t m_channels = 0;

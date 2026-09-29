@@ -44,8 +44,14 @@
 #include <QJsonArray>
 #include <QtConcurrent>
 #include <QFutureWatcher>
+#include <QTextDocument>
+#include <QImage>
 #include <QMutex>
 #include "IniFileLock.h"
+#include "ArtistTheater.h"
+#include "AlbumArt.h"
+#include <QPointer>
+#include <QComboBox>
 #include <windows.h>
 #include <io.h>        // _get_osfhandle（INI保存のFlushFileBuffers用）
 #include <mmsystem.h>  // MCI CD再生
@@ -199,10 +205,18 @@ public:
 
 static QString jp(const char *utf8) { return QString::fromUtf8(utf8); }
 
-// Wikipedia フォールバック URL（英語版をGoogle翻訳経由で検索）
-static QString fallbackUrl(const QString &artist)
+// ★ v10: 画面が英語表示かどうか（英語の翻訳が読み込まれていれば、この文言が英語に変わる）
+static bool uiIsEnglish()
+{
+    return QObject::tr("アーティスト情報") != QStringLiteral("アーティスト情報");
+}
+
+// Wikipedia フォールバック URL（日本語表示：英語版をGoogle翻訳で日本語に／英語表示：英語版をそのまま検索）
+[[maybe_unused]] static QString fallbackUrl(const QString &artist, bool english = false)
 {
     QString encoded = QString::fromUtf8(QUrl::toPercentEncoding(artist));
+    if (english)
+        return QString("https://en.wikipedia.org/w/index.php?search=%1").arg(encoded);
     return QString(
         "https://en-m-wikipedia-org.translate.goog/w/index.php"
         "?search=%1&_x_tr_sl=en&_x_tr_tl=ja&_x_tr_hl=ja").arg(encoded);
@@ -262,7 +276,7 @@ static QByteArray winHttpGet(const QString &urlStr)
 }
 
 // アーティスト名からWikipedia URLを取得（MusicBrainz経由）
-static QString searchWikipediaUrl(const QString &artist)
+[[maybe_unused]] static QString searchWikipediaUrl(const QString &artist, bool english = false)
 {
     // ① MusicBrainzでアーティスト検索
     QString encoded = QString::fromUtf8(QUrl::toPercentEncoding(artist));
@@ -271,14 +285,14 @@ static QString searchWikipediaUrl(const QString &artist)
         "?query=artist:%1&fmt=json&limit=1").arg(encoded);
 
     QByteArray data = winHttpGet(searchUrl);
-    if (data.isEmpty()) return fallbackUrl(artist);
+    if (data.isEmpty()) return fallbackUrl(artist, english);
 
     QJsonDocument doc = QJsonDocument::fromJson(data);
     QJsonArray artists = doc.object().value("artists").toArray();
-    if (artists.isEmpty()) return fallbackUrl(artist);
+    if (artists.isEmpty()) return fallbackUrl(artist, english);
 
     QString mbid = artists[0].toObject().value("id").toString();
-    if (mbid.isEmpty()) return fallbackUrl(artist);
+    if (mbid.isEmpty()) return fallbackUrl(artist, english);
 
     // ② MBIDでWikipedia URLを取得
     QString detailUrl = QString(
@@ -286,7 +300,7 @@ static QString searchWikipediaUrl(const QString &artist)
         "?inc=url-rels&fmt=json").arg(mbid);
 
     QByteArray data2 = winHttpGet(detailUrl);
-    if (data2.isEmpty()) return fallbackUrl(artist);
+    if (data2.isEmpty()) return fallbackUrl(artist, english);
 
     QJsonDocument doc2 = QJsonDocument::fromJson(data2);
     QJsonArray relations = doc2.object().value("relations").toArray();
@@ -300,6 +314,19 @@ static QString searchWikipediaUrl(const QString &artist)
             jaUrl = wUrl;
         else if (wUrl.contains("en.wikipedia.org"))
             enUrl = wUrl;
+    }
+
+    // ★ v10: 英語表示のときは英語版を優先。英語版が無ければ日本語版をGoogle翻訳で英語にして開く。
+    if (english) {
+        if (!enUrl.isEmpty()) return enUrl;
+        if (!jaUrl.isEmpty()) {
+            QString page = jaUrl;
+            page.replace("https://ja.wikipedia.org", "https://ja-m-wikipedia-org.translate.goog");
+            page += (page.contains("?") ? "&" : "?");
+            page += "_x_tr_sl=ja&_x_tr_tl=en&_x_tr_hl=en";
+            return page;
+        }
+        return fallbackUrl(artist, true);
     }
 
     // ③ 日本語版優先、なければ英語版をGoogle翻訳経由
@@ -384,6 +411,26 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         if (m_player->isPlaying()) {
             m_infoLabel->setText(m_player->getInfo(currentMode()));
 
+            // ★ v10修正：BitPerfectボタンの表示を、実際の出力形式に常に合わせる。
+            //   以前は曲が変わったとき（タグ読み込み後）に1回だけ更新していたため、
+            //   その後にモード切替・ASIOドライバのリセット・出力方式の切替などで
+            //   出力を開き直すと、ボタンだけ古いレートのまま残っていた
+            //   （例：ボタン「176.4kHz/32」なのに実際は352.8kHz）。
+            if (m_player->isUsingNewEngineNow() && m_bitPerfectBtn) {
+                const uint32_t r = m_player->newEngineActualSampleRate();
+                const uint32_t b = m_player->newEngineActualBits();
+                if (r > 0) {
+                    const QString khz = QString::number(r / 1000.0, 'f', r % 1000 == 0 ? 0 : 1);
+                    const int dsdBase = (r % 44100 == 0) ? 44100 : 48000;
+                    const QString t = m_player->nativeDsdActive()
+                        ? QString("Native DSD%1 ▼").arg(r * 8 / dsdBase)
+                        : m_player->isSharedOutput()
+                        ? QObject::tr("共有モード %1kHz ▼").arg(khz)
+                        : QString("BitPerfect %1kHz/%2 ▼").arg(khz).arg(b);
+                    if (m_bitPerfectBtn->text() != t) m_bitPerfectBtn->setText(t);
+                }
+            }
+
             // シークスライダー＆時間表示の更新（ドラッグ中は止める）
             if (!m_seekDragging) {
                 const double pos      = m_player->getPosition();
@@ -409,6 +456,17 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     //    ポーリング粒度が原因）。100msに短縮してPlayer側の内部タイマーと
     //    同程度の精度にし、見た目のズレを解消する。
     m_infoTimer->start(100);
+
+    // ★ v10: 出力方式（ASIO）を復元。DoP設定は出力ごとなので、loadFavorites()より先に行う。
+    //   ASIOドライバには、このアプリのメイン画面のウィンドウハンドルを渡す。
+    m_player->setAsioSysHandle(reinterpret_cast<void*>(winId()));
+    {
+        const QString be = iniReadValue(QStringLiteral("output"), QStringLiteral("backend"));
+        if (be.startsWith(QLatin1String("asio:"))) {
+            const QString drv = be.mid(5);
+            if (Player::asioDrivers().contains(drv)) m_player->setOutputBackend(true, drv);
+        }
+    }
 
     loadFavorites();
 
@@ -473,11 +531,11 @@ void MainWindow::onRemoteCommand(const QString &cmd, const QJsonObject &obj)
         if (v == "one") {
             m_player->setRepeat(Player::RepeatMode::One);
             m_repeatBtn->setChecked(true);
-            m_repeatBtn->setText(QString::fromUtf8("\xe2\x86\xa9 1\xe6\x9b\xb2"));
+            m_repeatBtn->setText(QObject::tr("↩ 1曲"));
         } else if (v == "all") {
             m_player->setRepeat(Player::RepeatMode::All);
             m_repeatBtn->setChecked(true);
-            m_repeatBtn->setText(QString::fromUtf8("\xe2\x86\xa9 \xe5\x85\xa8\xe6\x9b\xb2"));
+            m_repeatBtn->setText(QObject::tr("↩ 全曲"));
         } else {
             m_player->setRepeat(Player::RepeatMode::None);
             m_repeatBtn->setChecked(false);
@@ -490,7 +548,7 @@ void MainWindow::onRemoteCommand(const QString &cmd, const QJsonObject &obj)
         if (obj.value("mode").toString() == "folder") {
             m_player->setShuffle(Player::ShuffleMode::Folder);
             m_shuffleBtn->setChecked(true);
-            m_shuffleBtn->setText(QString::fromUtf8("\xe2\x87\x8c \xe3\x83\x95\xe3\x82\xa9\xe3\x83\xab\xe3\x83\x80\xe5\x86\x85"));
+            m_shuffleBtn->setText(QObject::tr("⇌ フォルダ内"));
         } else {
             m_player->setShuffle(Player::ShuffleMode::None);
             m_shuffleBtn->setChecked(false);
@@ -515,6 +573,84 @@ void MainWindow::onRemoteCommand(const QString &cmd, const QJsonObject &obj)
         publishRemoteStatus();
         return;
     }
+    // ── v10: 出力方式（WASAPI排他 / ASIO）。設定画面の「出力」と同じ処理
+    if (cmd == "outputs") { remoteSendOutputs(); return; }
+    if (cmd == "setOutput") {
+        const QString key = obj.value("key").toString();
+        const bool asio = key.startsWith(QLatin1String("asio:"));
+        if (key != QLatin1String("wasapi") && !(asio && Player::asioDrivers().contains(key.mid(5))))
+            return;   // 一覧に無い指定は無視（ドライバを外した後の古い指定など）
+        iniWriteValue(QStringLiteral("output"), QStringLiteral("backend"), key);
+        m_player->setOutputBackend(asio, asio ? key.mid(5) : QString());
+        remoteSendOutputs();
+        publishRemoteStatus();
+        return;
+    }
+
+    // ── v10: BitPerfect（自動 / 16種類の手動指定）。PC版のメニューを選んだのと同じ
+    if (cmd == "bitperfect") {
+        if (!m_bitPerfectBtn || !m_bitPerfectBtn->menu()) return;
+        const int rate = obj.value("rate").toInt();
+        const int bits = obj.value("bits").toInt();
+        if (rate <= 0) {
+            if (m_bpActOff) m_bpActOff->trigger();
+        } else {
+            for (QAction *act : m_bitPerfectBtn->menu()->actions()) {
+                const QVariantList d = act->data().toList();
+                if (d.size() == 2 && d[0].toInt() == rate && d[1].toInt() == bits) { act->trigger(); break; }
+            }
+        }
+        publishRemoteStatus();
+        return;
+    }
+
+    // ── v10: 設定画面の項目（管理者権限が要る電源プラン・USB最適化と、言語は除く）
+    if (cmd == "chain") {
+        if (!m_player->dspOff()) { m_player->setChainOn(obj.value("on").toBool()); scheduleSave(); }
+        publishRemoteStatus();
+        return;
+    }
+    if (cmd == "soundField") {
+        const QString v = obj.value("value").toString();
+        if (!m_player->dspOff() && (v.isEmpty() || v == "wowflutter" || v == "halltone")) {
+            m_soundField = v;
+            turnOffBitPerfect();
+            m_player->setMode(currentMode(), m_hp1On, m_hp2On, m_soundField);
+            scheduleSave();
+        }
+        publishRemoteStatus();
+        return;
+    }
+    if (cmd == "dspOff") {
+        applyDspOff(obj.value("on").toBool());
+        publishRemoteStatus();
+        return;
+    }
+    if (cmd == "coverOnline") {
+        const bool on = obj.value("on").toBool();
+        AlbumArt::setOnlineEnabled(on);
+        if (on) {
+            m_coverTried.clear();
+            if (!m_hasArtwork && !m_isCdMode) requestOnlineCover(m_player->currentFilePath());
+        }
+        publishRemoteStatus();
+        return;
+    }
+
+    // ── v10: アーティスト情報（PC版の「シアター画面」と同じ内容をスマホに表示）
+    if (cmd == "artistInfo") { remoteSendArtistInfo(obj.value("artist").toString()); return; }
+
+    // ── v10: DoP出力。PC画面の警告ダイアログは出さない
+    //    （PCの前に人がいないと、ダイアログで画面が止まってしまうため。確認はスマホ側で行う）
+    if (cmd == "dop") {
+        const bool on = obj.value("on").toBool();
+        if (m_dopAct) m_dopAct->setChecked(on);
+        m_player->setDopEnabled(on);
+        scheduleSave();
+        publishRemoteStatus();
+        return;
+    }
+
     if (cmd == "folderArt")  { remoteFolderArt(path); return; }
     if (cmd == "openFolder") {
         if (path.isEmpty() || !QDir(path).exists()) return;
@@ -631,6 +767,118 @@ void MainWindow::remoteFolderArt(const QString &path)
     });
 }
 
+// 今の曲のアーティストを分割（カンマ・セミコロン・スラッシュ・コロン）し、
+// (vn)(pf)などの楽器表記を除いたもの。「アーティスト情報」ボタンとリモコンで共通
+QStringList MainWindow::currentArtistList() const
+{
+    auto cleanArtist = [](const QString &s) -> QString {
+        QString result = s;
+        result.remove(QRegularExpression("\\([^)]*\\)"));  // (...)を除去
+        return result.trimmed();
+    };
+    QStringList artists;
+    if (m_currentArtist.isEmpty()) return artists;
+    if (m_currentArtist.contains(',') || m_currentArtist.contains(';') ||
+        m_currentArtist.contains('/') || m_currentArtist.contains(':')) {
+        const QStringList parts = m_currentArtist.split(QRegularExpression("[,;/:]"), Qt::SkipEmptyParts);
+        for (const QString &p : parts) {
+            const QString cleaned = cleanArtist(p);
+            if (!cleaned.isEmpty()) artists << cleaned;
+        }
+    } else {
+        const QString cleaned = cleanArtist(m_currentArtist);
+        artists << (cleaned.isEmpty() ? m_currentArtist : cleaned);
+    }
+    return artists;
+}
+
+// v10: アーティスト情報をスマホへ送る。artist が空なら今の曲の1人目。
+//      調べ方はPC版のシアター画面と同じ ArtistTheater::fetch（Wikipedia）。
+//      本文はスマホで読みやすいよう、HTMLを外した文章にして送る
+void MainWindow::remoteSendArtistInfo(const QString &artistIn)
+{
+    const QStringList artists = currentArtistList();
+    QJsonArray artistArr;
+    for (const QString &a : artists) artistArr.append(a);
+    const QString artist = artistIn.isEmpty() ? artists.value(0) : artistIn;
+    if (artist.isEmpty()) {
+        m_remote->send(QJsonObject{{"type", "artistInfo"}, {"artists", artistArr}, {"artist", ""}, {"ok", false}});
+        return;
+    }
+    const bool english = uiIsEnglish();
+    const QString key = (english ? "en:" : "ja:") + artist;
+    if (m_remoteArtistCache.contains(key)) {
+        QJsonObject o = m_remoteArtistCache.value(key);
+        o.insert("artists", artistArr);
+        m_remote->send(o);
+        return;
+    }
+    // 読み込み中の合図（スマホ側で「読み込み中…」を出す）
+    m_remote->send(QJsonObject{{"type", "artistInfo"}, {"artists", artistArr}, {"artist", artist},
+                               {"loading", true}});
+
+    auto *watcher = new QFutureWatcher<QJsonObject>(this);
+    connect(watcher, &QFutureWatcher<QJsonObject>::finished, this, [this, watcher, key, artistArr]() {
+        QJsonObject o = watcher->result();
+        watcher->deleteLater();
+        if (o.value("ok").toBool()) m_remoteArtistCache.insert(key, o);
+        o.insert("artists", artistArr);
+        if (m_remote) m_remote->send(o);
+    });
+    watcher->setFuture(QtConcurrent::run([artist, english]() {
+        const ArtistInfoData d = ArtistTheater::fetch(artist, english);
+        QJsonObject o{{"type", "artistInfo"}, {"artist", artist}, {"ok", d.ok}};
+        if (!d.ok) return o;
+        QTextDocument doc;
+        doc.setHtml(d.bodyHtml);
+        QByteArray jpeg;
+        if (!d.image.isEmpty()) {
+            QImage img;
+            if (img.loadFromData(d.image)) {
+                if (img.width() > 600 || img.height() > 600)
+                    img = img.scaled(600, 600, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                QBuffer buf(&jpeg);
+                buf.open(QIODevice::WriteOnly);
+                img.save(&buf, "JPG", 85);
+            }
+        }
+        o.insert("name", d.name);
+        o.insert("description", d.description);
+        o.insert("body", doc.toPlainText().trimmed());
+        o.insert("url", d.pageUrl);
+        o.insert("lang", d.lang);
+        o.insert("imageSource", d.imageSource);
+        o.insert("image", QString::fromLatin1(jpeg.toBase64()));
+        return o;
+    }));
+}
+
+// v10: 今のBitPerfect指定。"auto" または "44100/24"
+QString MainWindow::currentBitPerfectKey() const
+{
+    if (!m_bitPerfectBtn || !m_bitPerfectBtn->menu() || !m_bpActOff || m_bpActOff->isChecked())
+        return QStringLiteral("auto");
+    for (QAction *act : m_bitPerfectBtn->menu()->actions()) {
+        const QVariantList d = act->data().toList();
+        if (act->isChecked() && d.size() == 2)
+            return QString("%1/%2").arg(d[0].toInt()).arg(d[1].toInt());
+    }
+    return QStringLiteral("auto");
+}
+
+// v10: 出力方式の一覧（設定画面の「出力」と同じ並び）をスマホへ送る。
+//      ASIOドライバの列挙はレジストリを読むので、500msごとの状態送信には入れず要求時だけ
+void MainWindow::remoteSendOutputs()
+{
+    QJsonArray items;
+    items.append(QJsonObject{{"key", "wasapi"}, {"label", QObject::tr("WASAPI 排他（標準）")}});
+    for (const QString &d : Player::asioDrivers())
+        items.append(QJsonObject{{"key", QStringLiteral("asio:") + d}, {"label", QStringLiteral("ASIO: ") + d}});
+    const QString cur = m_player->usingAsio()
+        ? QStringLiteral("asio:") + m_player->asioDriverName() : QStringLiteral("wasapi");
+    m_remote->send(QJsonObject{{"type", "outputs"}, {"current", cur}, {"items", items}});
+}
+
 void MainWindow::publishRemoteStatus()
 {
     if (!m_remote || m_remote->clientCount() == 0) return;   // 誰もつないでいなければ何もしない
@@ -670,6 +918,11 @@ void MainWindow::publishRemoteStatus()
         m_remote->publishArt(art.isNull() ? 0 : m_remoteArtId, jpeg);
     }
 
+    // v10: BitPerfectボタンの表示（"BitPerfect 96kHz/24 ▼" 等）から末尾の ▼ を外して送る
+    QString outputText = m_bitPerfectBtn ? m_bitPerfectBtn->text() : QString();
+    outputText.remove(QChar(0x25BC));
+    outputText = outputText.trimmed();
+
     m_remote->publishStatus(QJsonObject{
         {"state",  state},
         {"title",  m_title ? m_title->text() : QString()},
@@ -694,6 +947,21 @@ void MainWindow::publishRemoteStatus()
                         {"on", m_hp2On}, {"enabled", m_hp2Btn && m_hp2Btn->isEnabled()}},
         }},
         {"modeDesc", m_modeDesc ? m_modeDesc->text() : QString()},
+        // ── v10: 出力の情報（PC画面の情報欄・BitPerfectボタンと同じ表示）
+        {"info",      m_infoLabel ? m_infoLabel->text() : QString()},
+        {"output",    outputText},
+        {"backend",   m_player->usingAsio() ? QStringLiteral("asio:") + m_player->asioDriverName()
+                                            : QStringLiteral("wasapi")},
+        {"bp",        currentBitPerfectKey()},
+        {"dop",       m_player->dopEnabled()},
+        {"dopActive", !m_isCdMode && m_player->dopActive()},
+        {"nativeDsd", !m_isCdMode && m_player->nativeDsdActive()},
+        // ── v10: 設定画面の項目
+        {"chain",       m_player->chainOn()},
+        {"soundField",  m_soundField},
+        {"dspOff",      m_player->dspOff()},
+        {"coverOnline", AlbumArt::onlineEnabled()},
+        {"hasArtist",   !m_isCdMode && !m_currentArtist.isEmpty()},
     });
 }
 
@@ -713,11 +981,11 @@ void MainWindow::setupUI()
     tbL->setContentsMargins(12, 8, 12, 8);
     tbL->setSpacing(8);
 
-    QPushButton *folderBtn = new QPushButton(jp("\xe3\x83\x95\xe3\x82\xa9\xe3\x83\xab\xe3\x83\x80\xe3\x82\x92\xe9\x81\xb8\xe6\x8a\x9e\xe3\x81\x97\xe3\x81\xa6\xe5\x86\x8d\xe7\x94\x9f"));
+    QPushButton *folderBtn = new QPushButton(QObject::tr("フォルダを選択して再生"));
     folderBtn->setObjectName("toolBtn");
     connect(folderBtn, &QPushButton::clicked, this, &MainWindow::onSelectFolder);
 
-    m_albumBrowseBtn = new QPushButton(jp("\xe3\x82\xa2\xe3\x83\xab\xe3\x83\x90\xe3\x83\xa0\xe3\x82\x92\xe8\xa1\xa8\xe7\xa4\xba"));
+    m_albumBrowseBtn = new QPushButton(QObject::tr("アルバムを表示"));
     m_albumBrowseBtn->setObjectName("toolBtn");
     connect(m_albumBrowseBtn, &QPushButton::clicked, this, &MainWindow::onBrowseAlbums);
 
@@ -725,7 +993,7 @@ void MainWindow::setupUI()
     m_infoLabel->setObjectName("infoLabel");
     m_infoLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 
-    QPushButton *trayBtn = new QPushButton(jp("\xe2\x96\xbc \xe3\x83\x88\xe3\x83\xac\xe3\x82\xa4"));
+    QPushButton *trayBtn = new QPushButton(QObject::tr("▼ トレイ"));
     trayBtn->setObjectName("toolBtn");
     trayBtn->setFixedWidth(72);
     connect(trayBtn, &QPushButton::clicked, this, &QWidget::hide);
@@ -761,16 +1029,16 @@ void MainWindow::setupUI()
         aOff->setChecked(cur == Player::ShuffleMode::None);
         grp->addAction(aOff);
 
-        auto *aFolder = menu->addAction(QString::fromUtf8("\xe3\x83\x95\xe3\x82\xa9\xe3\x83\xab\xe3\x83\x80\xe5\x86\x85"), [this]{
+        auto *aFolder = menu->addAction(QObject::tr("フォルダ内"), [this]{
             m_player->setShuffle(Player::ShuffleMode::Folder);
             m_shuffleBtn->setChecked(true);
-            m_shuffleBtn->setText(QString::fromUtf8("\xe2\x87\x8c \xe3\x83\x95\xe3\x82\xa9\xe3\x83\xab\xe3\x83\x80\xe5\x86\x85"));
+            m_shuffleBtn->setText(QObject::tr("⇌ フォルダ内"));
         });
         aFolder->setCheckable(true);
         aFolder->setChecked(cur == Player::ShuffleMode::Folder);
         grp->addAction(aFolder);
 
-        auto *aFav = menu->addAction(QString::fromUtf8("\xe3\x81\x8a\xe6\xb0\x97\xe3\x81\xab\xe5\x85\xa1\xe3\x82\x8a\xef\xbc\x88\xe5\x85\xa8\xe3\x83\xaa\xe3\x82\xb9\xe3\x83\x88\xef\xbc\x89"), [this]{
+        auto *aFav = menu->addAction(QObject::tr("お気に入り（全リスト）"), [this]{
             // 全リストのパスをまとめる
             QStringList paths;
             for (const auto &fl : m_favoriteLists)
@@ -779,7 +1047,7 @@ void MainWindow::setupUI()
             m_player->setFavoritePaths(paths);
             m_player->setShuffle(Player::ShuffleMode::Favorites);
             m_shuffleBtn->setChecked(true);
-            m_shuffleBtn->setText(QString::fromUtf8("\xe2\x87\x8c \xe3\x81\x8a\xe6\xb0\x97\xe3\x81\xab\xe5\x85\xa5\xe3\x82\x8a"));
+            m_shuffleBtn->setText(QObject::tr("⇌ お気に入り"));
             if (!paths.isEmpty()) { loadFolder(paths.first(), false); m_player->play(0); }
         });
         aFav->setCheckable(true);
@@ -833,19 +1101,19 @@ void MainWindow::setupUI()
         aOff->setChecked(cur == Player::RepeatMode::None);
         grp->addAction(aOff);
 
-        auto *aOne = menu->addAction(QString::fromUtf8("1\xe6\x9b\xb2"), [this]{
+        auto *aOne = menu->addAction(QObject::tr("1曲"), [this]{
             m_player->setRepeat(Player::RepeatMode::One);
             m_repeatBtn->setChecked(true);
-            m_repeatBtn->setText(QString::fromUtf8("\xe2\x86\xa9 1\xe6\x9b\xb2"));
+            m_repeatBtn->setText(QObject::tr("↩ 1曲"));
         });
         aOne->setCheckable(true);
         aOne->setChecked(cur == Player::RepeatMode::One);
         grp->addAction(aOne);
 
-        auto *aAll = menu->addAction(QString::fromUtf8("\xe5\x85\xa8\xe6\x9b\xb2"), [this]{
+        auto *aAll = menu->addAction(QObject::tr("全曲"), [this]{
             m_player->setRepeat(Player::RepeatMode::All);
             m_repeatBtn->setChecked(true);
-            m_repeatBtn->setText(QString::fromUtf8("\xe2\x86\xa9 \xe5\x85\xa8\xe6\x9b\xb2"));
+            m_repeatBtn->setText(QObject::tr("↩ 全曲"));
         });
         aAll->setCheckable(true);
         aAll->setChecked(cur == Player::RepeatMode::All);
@@ -865,54 +1133,20 @@ void MainWindow::setupUI()
     tbL->addWidget(m_repeatBtn);
     tbL->addWidget(m_sleepBtn);
 
-    m_artistInfoBtn = new QPushButton("アーティスト情報");
+    m_artistInfoBtn = new QPushButton(QObject::tr("アーティスト情報"));
     m_artistInfoBtn->setObjectName("toolBtn");
     m_artistInfoBtn->setEnabled(false);
     connect(m_artistInfoBtn, &QPushButton::clicked, this, [this]() {
         stopIfCd();  // ★ CD再生中なら停止
         if (m_currentArtist.isEmpty()) return;
 
-        // カンマ・セミコロン・スラッシュ・コロンで複数アーティストに分割
-        // (vn)(pf)などの楽器表記を除去してから検索
-        auto cleanArtist = [](const QString &s) -> QString {
-            QString result = s;
-            result.remove(QRegularExpression("\\([^)]*\\)"));  // (...)を除去
-            return result.trimmed();
-        };
+        const QStringList artists = currentArtistList();
 
-        QStringList artists;
-        if (m_currentArtist.contains(',') || m_currentArtist.contains(';') ||
-            m_currentArtist.contains('/') || m_currentArtist.contains(':')) {
-            QStringList parts = m_currentArtist.split(
-                QRegularExpression("[,;/:]"), Qt::SkipEmptyParts);
-            for (const QString &p : parts) {
-                QString cleaned = cleanArtist(p);
-                if (!cleaned.isEmpty()) artists << cleaned;
-            }
-        } else {
-            QString cleaned = cleanArtist(m_currentArtist);
-            artists << (cleaned.isEmpty() ? m_currentArtist : cleaned);
-        }
-
-        // 全アーティストを1スレッドでまとめて検索してURLリストを返す
-        auto *watcher = new QFutureWatcher<QStringList>(this);
-        connect(watcher, &QFutureWatcher<QStringList>::finished, this,
-                [this, watcher]() {
-            QStringList urls = watcher->result();
-            watcher->deleteLater();
-            for (const QString &url : urls) {
-                if (!url.isEmpty())
-                    QDesktopServices::openUrl(QUrl(url));
-            }
-        });
-
-        watcher->setFuture(QtConcurrent::run([artists]() -> QStringList {
-            QStringList urls;
-            for (const QString &artist : artists) {
-                urls << searchWikipediaUrl(artist);
-            }
-            return urls;
-        }));
+        // ★ v10: ブラウザは開かず、Always Playerの中の「シアター画面」で表示する
+        //   （写真・ひとこと紹介・Wikipediaの本文。画面の言語の版を優先）。
+        static QPointer<ArtistTheater> theater;
+        if (!theater) theater = new ArtistTheater(this);
+        theater->showArtists(artists, uiIsEnglish());
     });
 
     tbL->addWidget(m_artistInfoBtn);
@@ -920,14 +1154,14 @@ void MainWindow::setupUI()
     // ── ビットパーフェクトドロップダウン
     m_bitPerfectBtn = new QPushButton("BitPerfect ▼");
     m_bitPerfectBtn->setObjectName("toolBtn");
-    m_bitPerfectBtn->setToolTip("ビットパーフェクト出力（排他モード）");
+    m_bitPerfectBtn->setToolTip(QObject::tr("ビットパーフェクト出力（排他モード）"));
 
     QMenu *bpMenu = new QMenu(this);
     bpMenu->setObjectName("bitPerfectMenu");
 
     // OFF
     // v10: 共有モードは無くなったので「自動（モード連動）」に名称変更
-    m_bpActOff = bpMenu->addAction(QString::fromUtf8("\xe8\x87\xaa\xe5\x8b\x95\xef\xbc\x88\xe3\x83\xa2\xe3\x83\xbc\xe3\x83\x89\xe9\x80\xa3\xe5\x8b\x95\xef\xbc\x89"));
+    m_bpActOff = bpMenu->addAction(QObject::tr("自動（モード連動）"));
     m_bpActOff->setCheckable(true);
     m_bpActOff->setChecked(true);
     bpMenu->addSeparator();
@@ -965,13 +1199,10 @@ void MainWindow::setupUI()
 
     // ★ v10: DoP出力（初期OFF）。レート選択のグループとは独立したON/OFF項目。
     bpMenu->addSeparator();
-    m_dopAct = bpMenu->addAction(QString::fromUtf8("DoP出力（DSD対応DACのみ・機器ごとに記憶）"));
+    m_dopAct = bpMenu->addAction(QObject::tr("DoP出力（DSD対応DACのみ・機器ごとに記憶）"));
     m_dopAct->setCheckable(true);
     m_dopAct->setChecked(false);
-    m_dopAct->setToolTip(QString::fromUtf8(
-        "DSF/DFFをDSDのままDACへ送ります。DSD非対応のDACでは大きなノイズになるので、"
-        "対応DACのときだけONにしてください。DoP中は音量スライダーは効きません（DAC側で調整）。"
-        "設定は出力デバイスごとに記憶され、別の機器に切り替えると自動でOFFになります。"));
+    m_dopAct->setToolTip(QObject::tr("DSF/DFFをDSDのままDACへ送ります。DSD非対応のDACでは大きなノイズになるので、対応DACのときだけONにしてください。DoP中は音量スライダーは効きません（DAC側で調整）。設定は出力デバイスごとに記憶され、別の機器に切り替えると自動でOFFになります。"));
     // v10: 出力デバイスの切替でDoP設定が変わったら、メニューのチェックも追従させる
     connect(m_player, &Player::dopStateChanged, this, [this](bool on) {
         if (m_dopAct) m_dopAct->setChecked(on);
@@ -983,11 +1214,7 @@ void MainWindow::setupUI()
             const bool on = m_dopAct->isChecked();
             if (on) {
                 QMessageBox::warning(this, QStringLiteral("Always Player"),
-                    QString::fromUtf8("今の出力デバイスでDoP出力をONにしました。\n"
-                        "（別の出力デバイスに切り替えると自動でOFFになります）\n\n"
-                        "DSD非対応のDACでは「サー」という大きなノイズになります。\n"
-                        "最初はDAC・アンプの音量を下げてから再生してください。\n"
-                        "DoP中は音量スライダーは効きません（DAC側で調整してください）。"));
+                    QObject::tr("今の出力デバイスでDoP出力をONにしました。\n（別の出力デバイスに切り替えると自動でOFFになります）\n\nDSD非対応のDACでは「サー」という大きなノイズになります。\n最初はDAC・アンプの音量を下げてから再生してください。\nDoP中は音量スライダーは効きません（DAC側で調整してください）。"));
             }
             m_player->setDopEnabled(on);
             scheduleSave();
@@ -1094,10 +1321,10 @@ void MainWindow::setupUI()
 
     const QStringList modeKeys   = {"pure","hires4","dsd8","loudness"};
     const QStringList modeLabels = {
-        jp("\xe3\x83\x94\xe3\x83\xa5\xe3\x82\xa2"),
-        jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4"),
-        jp("\xe7\x96\x91\xe4\xbc\xbc") + "DSD x8",
-        jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9"),
+        QObject::tr("ピュア"),
+        QObject::tr("ハイレゾ x4"),
+        QObject::tr("疑似DSD x8"),
+        QObject::tr("ラウドネス"),
     };
     for (int i = 0; i < 4; i++) {
         QPushButton *btn = new QPushButton(modeLabels[i]);
@@ -1128,11 +1355,11 @@ void MainWindow::setupUI()
     // ── HP buttons
     QHBoxLayout *hpRow = new QHBoxLayout();
     hpRow->setSpacing(6);
-    m_hp1Btn = new QPushButton(jp("HP1  \xe5\xbc\xb1\xef\xbc\x88\xe8\x87\xaa\xe7\x84\xb6\xe3\x81\xaa\xe5\xba\x83\xe3\x81\x8c\xe3\x82\x8a\xef\xbc\x89"));
+    m_hp1Btn = new QPushButton(QObject::tr("HP1  弱（自然な広がり）"));
     m_hp1Btn->setObjectName("modeBtn");
     m_hp1Btn->setCheckable(true);
     QPushButton *hp1Btn = m_hp1Btn;
-    m_hp2Btn = new QPushButton(jp("HP2  \xe5\xbc\xb7\xef\xbc\x88\xe5\x89\x8d\xe6\x96\xb9\xe5\xae\x9a\xe4\xbd\x8d\xef\xbc\x89"));
+    m_hp2Btn = new QPushButton(QObject::tr("HP2  強（前方定位）"));
     m_hp2Btn->setObjectName("modeBtn");
     m_hp2Btn->setCheckable(true);
     QPushButton *hp2Btn = m_hp2Btn;
@@ -1152,7 +1379,7 @@ void MainWindow::setupUI()
     hpRow->addWidget(m_hp2Btn);
     cl->addLayout(hpRow);
 
-    m_modeDesc = new QLabel(jp("8\xe5\x80\x8d\xe3\x82\xa2\xe3\x83\x83\xe3\x83\x97\xe3\x82\xb5\xe3\x83\xb3\xe3\x83\x97\xe3\x83\xaa\xe3\x83\xb3\xe3\x82\xb0 / \xe3\x83\x8e\xe3\x82\xa4\xe3\x82\xba\xe3\x82\xb7\xe3\x82\xa7\xe3\x83\xbc\xe3\x83\x94\xe3\x83\xb3\xe3\x82\xb0 / \xe7\x96\x91\xe4\xbc\xbc""DSD"));
+    m_modeDesc = new QLabel(QObject::tr("8倍アップサンプリング / ノイズシェーピング / 疑似DSD"));
     m_modeDesc->setObjectName("modeDesc");
     m_modeDesc->setAlignment(Qt::AlignCenter);
     cl->addWidget(m_modeDesc);
@@ -1333,7 +1560,7 @@ void MainWindow::setupUI()
     // ── search & favorites
     QHBoxLayout *searchRow = new QHBoxLayout();
     m_searchBox = new QLineEdit();
-    m_searchBox->setPlaceholderText(jp("\xe6\xa4\x9c\xe7\xb4\xa2..."));
+    m_searchBox->setPlaceholderText(QObject::tr("検索..."));
     m_searchBox->setObjectName("searchBox");
     connect(m_searchBox, &QLineEdit::textChanged, this, &MainWindow::onSearchChanged);
 
@@ -1342,7 +1569,7 @@ void MainWindow::setupUI()
     m_starBtn->setFixedSize(32, 32);
     connect(m_starBtn, &QPushButton::clicked, this, &MainWindow::onFavoriteClicked);
 
-    m_favBtn = new QPushButton(jp("\xe2\x98\x85 \xe3\x83\xaa\xe3\x82\xb9\xe3\x83\x88"));
+    m_favBtn = new QPushButton(QObject::tr("★ リスト"));
     m_favBtn->setObjectName("favBtn");
     m_favBtn->setFixedHeight(32);
     connect(m_favBtn, &QPushButton::clicked, this, &MainWindow::onShowFavorites);
@@ -1518,8 +1745,8 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr
             stopCdStream();
             clearCdState();
             m_title->setText("CD");
-            m_subTitle->setText(jp("\xe3\x83\x87\xe3\x82\xa3\xe3\x82\xb9\xe3\x82\xaf\xe3\x81\x8c\xe3\x81\x82\xe3\x82\x8a\xe3\x81\xbe\xe3\x81\x9b\xe3\x82\x93"));
-            m_statusBar->setText(jp(">> CD\xe3\x82\x92\xe6\x8c\xbf\xe5\x85\xa5\xe3\x81\x97\xe3\x81\xa6\xe3\x81\x8f\xe3\x81\xa0\xe3\x81\x95\xe3\x81\x84"));
+            m_subTitle->setText(QObject::tr("ディスクがありません"));
+            m_statusBar->setText(QObject::tr(">> CDを挿入してください"));
         }
         if (msg->wParam == 0x8000) {
             // CD挿入 → 2秒後に自動認識
@@ -1599,7 +1826,7 @@ void MainWindow::onSelectFolder()
     }
 
     QString path = QFileDialog::getExistingDirectory(
-        this, jp("\xe9\x9f\xb3\xe6\xa5\xbd\xe3\x83\x95\xe3\x82\xa9\xe3\x83\xab\xe3\x83\x80\xe3\x82\x92\xe9\x81\xb8\xe6\x8a\x9e"),
+        this, QObject::tr("音楽フォルダを選択"),
         m_currentFolder, QFileDialog::ShowDirsOnly);
 
     if (path.isEmpty()) return;
@@ -1702,7 +1929,7 @@ void MainWindow::playCd(const QString &drive)
     setWindowTitle(jp("Always Player  v10.0.0  -  CD"));
     // ★ バックグラウンドでメタデータ取得開始（再生前はpauseBtn無効）
     // pauseBtn は常に有効（setEnabledによる色変化を避ける）
-    m_statusBar->setText(jp("\xe6\xa4\x9c\xe7\xb4\xa2\xe4\xb8\xad... MusicBrainz / iTunes"));
+    m_statusBar->setText(QObject::tr("検索中... MusicBrainz / iTunes"));
     if (!m_cdMetaFetcher) {
         m_cdMetaFetcher = new CdMetaFetcher(this);
         connect(m_cdMetaFetcher, &CdMetaFetcher::metaReady,
@@ -1718,21 +1945,21 @@ void MainWindow::playCd(const QString &drive)
     // pure以外のモードボタンにDSP処理不可を追加表示
     {
         QMap<QString,QString> cdLabels;
-        cdLabels["hires4"] = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe  " "\xef\xbc\x88" "DSP" "\xe5\x87\xa6\xe7\x90\x86\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
-        cdLabels["dsd8"]   = jp("\xe7\x96\x91\xe4\xbc\xbc" "DSD  " "\xef\xbc\x88" "DSP" "\xe5\x87\xa6\xe7\x90\x86\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
-        cdLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9  " "\xef\xbc\x88" "DSP" "\xe5\x87\xa6\xe7\x90\x86\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
+        cdLabels["hires4"] = QObject::tr("ハイレゾ  （DSP処理不可）");
+        cdLabels["dsd8"]   = QObject::tr("疑似DSD  （DSP処理不可）");
+        cdLabels["loudness"] = QObject::tr("ラウドネス  （DSP処理不可）");
         for (auto it = cdLabels.begin(); it != cdLabels.end(); ++it)
             if (m_modeBtns.contains(it.key()))
                 m_modeBtns[it.key()]->setText(it.value());
     }
     // HP1/HP2をDSP処理不可表示に変更
     if (m_hp1Btn) {
-        m_hp1Btn->setText(jp("HP1  \xe5\xbc\xb1\xef\xbc\x88" "DSP" "\xe5\x87\xa6\xe7\x90\x86\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89"));
+        m_hp1Btn->setText(QObject::tr("HP1  弱（DSP処理不可）"));
         m_hp1Btn->setEnabled(false);
         m_hp1Btn->setCheckable(false);
     }
     if (m_hp2Btn) {
-        m_hp2Btn->setText(jp("HP2  \xe5\xbc\xb7\xef\xbc\x88" "DSP" "\xe5\x87\xa6\xe7\x90\x86\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89"));
+        m_hp2Btn->setText(QObject::tr("HP2  強（DSP処理不可）"));
         m_hp2Btn->setEnabled(false);
         m_hp2Btn->setCheckable(false);
     }
@@ -1780,21 +2007,21 @@ void MainWindow::stopIfCd()
     // モードボタンのテキストを元に戻す
     {
         QMap<QString,QString> origLabels;
-        origLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4");
-        origLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc") + "DSD x8";
-        origLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9");
+        origLabels["hires4"]   = QObject::tr("ハイレゾ x4");
+        origLabels["dsd8"]     = QObject::tr("疑似DSD x8");
+        origLabels["loudness"] = QObject::tr("ラウドネス");
         for (auto it = origLabels.begin(); it != origLabels.end(); ++it)
             if (m_modeBtns.contains(it.key()))
                 m_modeBtns[it.key()]->setText(it.value());
     }
     // HP1/HP2を元のテキストに復元
     if (m_hp1Btn) {
-        m_hp1Btn->setText(jp("HP1  \xe5\xbc\xb1\xef\xbc\x88\xe8\x87\xaa\xe7\x84\xb6\xe3\x81\xaa\xe5\xba\x83\xe3\x81\x8c\xe3\x82\x8a\xef\xbc\x89"));
+        m_hp1Btn->setText(QObject::tr("HP1  弱（自然な広がり）"));
         m_hp1Btn->setEnabled(true);
         m_hp1Btn->setCheckable(true);
     }
     if (m_hp2Btn) {
-        m_hp2Btn->setText(jp("HP2  \xe5\xbc\xb7\xef\xbc\x88\xe5\x89\x8d\xe6\x96\xb9\xe5\xae\x9a\xe4\xbd\x8d\xef\xbc\x89"));
+        m_hp2Btn->setText(QObject::tr("HP2  強（前方定位）"));
         m_hp2Btn->setEnabled(true);
         m_hp2Btn->setCheckable(true);
     }
@@ -1924,7 +2151,7 @@ void MainWindow::startCdTrackStream(int trackIndex)
                     m_vuMeter->setPlaying(false);
                     m_seekSlider->setValue(0);
                     m_timeLabel->setText("0:00 / 0:00");
-                    m_statusBar->setText(">> CD 再生完了");
+                    m_statusBar->setText(QObject::tr(">> CD 再生完了"));
                     setWindowTitle(jp("Always Player  v10.0.0  -  CD"));
                 }
             }
@@ -1955,9 +2182,9 @@ void MainWindow::loadFolder(const QString &path, bool autoPlay)
     // モードボタンのテキストを元に戻す（ハイレゾ/CD表示から復元）
     {
         QMap<QString,QString> origLabels;
-        origLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4");
-        origLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc") + "DSD x8";
-        origLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9");
+        origLabels["hires4"]   = QObject::tr("ハイレゾ x4");
+        origLabels["dsd8"]     = QObject::tr("疑似DSD x8");
+        origLabels["loudness"] = QObject::tr("ラウドネス");
         for (auto it = origLabels.begin(); it != origLabels.end(); ++it)
             if (m_modeBtns.contains(it.key()))
                 m_modeBtns[it.key()]->setText(it.value());
@@ -2033,13 +2260,13 @@ void MainWindow::loadFolder(const QString &path, bool autoPlay)
         QString autoMode = hiRes ? "pure" : m_userMode; // v10: 以前は常にdsd8へ戻していた
         {
             QMap<QString,QString> hiResLabels;
-            hiResLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
-            hiResLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc" "DSD x8  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
-            hiResLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
+            hiResLabels["hires4"]   = QObject::tr("ハイレゾ x4  （使用不可）");
+            hiResLabels["dsd8"]     = QObject::tr("疑似DSD x8  （使用不可）");
+            hiResLabels["loudness"] = QObject::tr("ラウドネス  （使用不可）");
             QMap<QString,QString> origLabels;
-            origLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4");
-            origLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc") + "DSD x8";
-            origLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9");
+            origLabels["hires4"]   = QObject::tr("ハイレゾ x4");
+            origLabels["dsd8"]     = QObject::tr("疑似DSD x8");
+            origLabels["loudness"] = QObject::tr("ラウドネス");
             for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
                 it.value()->setChecked(it.key() == autoMode);
                 bool enabled = !hiRes || it.key() == "pure";
@@ -2083,6 +2310,7 @@ void MainWindow::loadFolder(const QString &path, bool autoPlay)
         m_hasArtwork = false;
         m_showVU = true;
         m_stack->setCurrentIndex(0);
+        requestOnlineCover(m_player->filePathAt(0));
     }
 
     if (autoPlay)
@@ -2111,6 +2339,34 @@ void MainWindow::updateJacket()
     m_hasArtwork = false;
     m_showVU = true;
     m_stack->setCurrentIndex(0);  // アートワークなしは常にVU表示
+    requestOnlineCover(m_player->currentFilePath());
+}
+
+// ★ v10: 曲にもフォルダにもジャケット画像が無いとき、ネットから取得する（設定でオンのときだけ）。
+//   アーティスト名とアルバム名が一致したものだけを使い、アプリのキャッシュに保存する。曲ファイルは変更しない。
+void MainWindow::requestOnlineCover(const QString &audioFile)
+{
+    if (audioFile.isEmpty() || audioFile.startsWith(QLatin1String("cdda://")) || !AlbumArt::onlineEnabled())
+        return;
+    const AlbumArt::Tags t = AlbumArt::readTags(audioFile);
+    if (t.artist.isEmpty() || t.album.isEmpty()) return;
+    const QString key = t.artist + QChar(0x1f) + t.album;
+    if (m_coverTried.contains(key)) return;   // 取得中、またはこの起動中に見つからなかったアルバム
+    m_coverTried.insert(key);
+
+    auto *watcher = new QFutureWatcher<QByteArray>(this);
+    connect(watcher, &QFutureWatcher<QByteArray>::finished, this, [this, watcher, t]() {
+        const QByteArray img = watcher->result();
+        watcher->deleteLater();
+        if (img.isEmpty() || AlbumArt::saveToCache(t, img).isEmpty()) return;
+        // 今の曲が同じアルバムで、まだ画像を表示していないときだけ差し替える
+        if (m_hasArtwork || m_isCdMode) return;
+        const AlbumArt::Tags cur = AlbumArt::readTags(m_player->currentFilePath());
+        if (cur.artist != t.artist || cur.album != t.album) return;
+        m_showVU = false;
+        updateJacket();
+    });
+    watcher->setFuture(QtConcurrent::run([t]() { return AlbumArt::fetchOnline(t); }));
 }
 
 void MainWindow::onTrackChanged(int index, const QString &filename,
@@ -2196,7 +2452,7 @@ void MainWindow::onTrackChanged(int index, const QString &filename,
                     //      そうとわかる表示にする
                     if (m_player->isSharedOutput())
                         m_bitPerfectBtn->setText(
-                            QString::fromUtf8("共有モード %1kHz ▼")
+                            QObject::tr("共有モード %1kHz ▼")
                             .arg(newRate / 1000.0, 0, 'f', newRate % 1000 == 0 ? 0 : 1));
                     else
                     m_bitPerfectBtn->setText(
@@ -2218,13 +2474,13 @@ void MainWindow::onTrackChanged(int index, const QString &filename,
                 // ボタン状態更新
                 {
                     QMap<QString,QString> hiResLabels;
-                    hiResLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
-                    hiResLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc" "DSD x8  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
-                    hiResLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9  " "\xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
+                    hiResLabels["hires4"]   = QObject::tr("ハイレゾ x4  （使用不可）");
+                    hiResLabels["dsd8"]     = QObject::tr("疑似DSD x8  （使用不可）");
+                    hiResLabels["loudness"] = QObject::tr("ラウドネス  （使用不可）");
                     QMap<QString,QString> origLabels;
-                    origLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4");
-                    origLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc") + "DSD x8";
-                    origLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9");
+                    origLabels["hires4"]   = QObject::tr("ハイレゾ x4");
+                    origLabels["dsd8"]     = QObject::tr("疑似DSD x8");
+                    origLabels["loudness"] = QObject::tr("ラウドネス");
                     for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
                         it.value()->setChecked(it.key() == autoMode);
                         bool enabled = !hiRes || it.key() == "pure";
@@ -2280,26 +2536,24 @@ void MainWindow::onFavoriteClicked()
     // リストが空なら自動でリスト1を作成
     if (m_favoriteLists.isEmpty()) {
         FavoriteList fl;
-        fl.name = QString::fromUtf8("\xe3\x83\xaa\xe3\x82\xb9\xe3\x83\x88") + "1";
+        fl.name = QObject::tr("リスト") + "1";
         m_favoriteLists.append(fl);
     }
 
     // どのリストに追加するか選択ダイアログ
     QDialog *dlg = new QDialog(this);
-    dlg->setWindowTitle(QString::fromUtf8("\xe3\x83\xaa\xe3\x82\xb9\xe3\x83\x88\xe3\x81\xab\xe8\xbf\xbd\xe5\x8a\xa0"));
+    dlg->setWindowTitle(QObject::tr("リストに追加"));
     dlg->resize(300, 200);
     QVBoxLayout *vl = new QVBoxLayout(dlg);
 
-    auto *label = new QLabel(QString::fromUtf8(
-        "\xe3\x81\xa9\xe3\x81\xae\xe3\x83\xaa\xe3\x82\xb9\xe3\x83\x88\xe3\x81\xab\xe8\xbf\xbd\xe5\x8a\xa0\xe3\x81\x97\xe3\x81\xbe\xe3\x81\x99\xe3\x81\x8b\xef\xbc\x9f"));
+    auto *label = new QLabel(QObject::tr("どのリストに追加しますか？"));
     vl->addWidget(label);
 
     QListWidget *lw = new QListWidget();
     for (int i = 0; i < m_favoriteLists.size(); ++i) {
         const auto &fl = m_favoriteLists[i];
         auto *item = new QListWidgetItem(
-            QString("%1  (%2%3)").arg(fl.name).arg(fl.items.size())
-            .arg(QString::fromUtf8("\xe6\x9b\xb2")));
+            QObject::tr("%1  (%2曲)").arg(fl.name).arg(fl.items.size()));
         item->setData(Qt::UserRole, i);
         lw->addItem(item);
         if (i == m_activeListIndex) lw->setCurrentRow(i);
@@ -2307,21 +2561,21 @@ void MainWindow::onFavoriteClicked()
     vl->addWidget(lw);
 
     // 新しいリストを作成
-    auto *newListBtn = new QPushButton(QString::fromUtf8("＋ \xe6\x96\xb0\xe3\x81\x97\xe3\x81\x84\xe3\x83\xaa\xe3\x82\xb9\xe3\x83\x88\xe3\x82\x92\xe4\xbd\x9c\xe6\x88\x90"));
+    auto *newListBtn = new QPushButton(QObject::tr("＋ 新しいリストを作成"));
     newListBtn->setObjectName("toolBtn");
     connect(newListBtn, &QPushButton::clicked, dlg, [this, lw, dlg]() {
         bool ok;
         QString listName = QInputDialog::getText(dlg,
-            QString::fromUtf8("\xe6\x96\xb0\xe3\x81\x97\xe3\x81\x84\xe3\x83\xaa\xe3\x82\xb9\xe3\x83\x88"),
-            QString::fromUtf8("\xe3\x83\xaa\xe3\x82\xb9\xe3\x83\x88\xe5\x90\x8d\xe3\x82\x92\xe5\x85\xa5\xe5\x8a\x9b\xe3\x81\x97\xe3\x81\xa6\xe3\x81\x8f\xe3\x81\xa0\xe3\x81\x95\xe3\x81\x84\xef\xbc\x9a"),
-            QLineEdit::Normal, QString::fromUtf8("\xe3\x83\xaa\xe3\x82\xb9\xe3\x83\x88") + QString::number(m_favoriteLists.size() + 1), &ok);
+            QObject::tr("新しいリスト"),
+            QObject::tr("リスト名を入力してください："),
+            QLineEdit::Normal, QObject::tr("リスト") + QString::number(m_favoriteLists.size() + 1), &ok);
         if (ok && !listName.isEmpty()) {
             FavoriteList fl;
             fl.name = listName;
             m_favoriteLists.append(fl);
             int idx = m_favoriteLists.size() - 1;
             auto *item = new QListWidgetItem(
-                QString("%1  (0%2)").arg(listName).arg(QString::fromUtf8("\xe6\x9b\xb2")));
+                QObject::tr("%1  (0曲)").arg(listName));
             item->setData(Qt::UserRole, idx);
             lw->addItem(item);
             lw->setCurrentRow(idx);
@@ -2330,9 +2584,9 @@ void MainWindow::onFavoriteClicked()
     vl->addWidget(newListBtn);
 
     QHBoxLayout *hl = new QHBoxLayout();
-    auto *addBtn    = new QPushButton(QString::fromUtf8("\xe8\xbf\xbd\xe5\x8a\xa0"));
-    auto *removeBtn = new QPushButton(QString::fromUtf8("\xe5\x89\x8a\xe9\x99\xa4"));
-    auto *cancelBtn = new QPushButton(QString::fromUtf8("\xe9\x96\x89\xe3\x81\x98\xe3\x82\x8b"));
+    auto *addBtn    = new QPushButton(QObject::tr("追加"));
+    auto *removeBtn = new QPushButton(QObject::tr("削除"));
+    auto *cancelBtn = new QPushButton(QObject::tr("閉じる"));
     addBtn->setObjectName("toolBtn");
     removeBtn->setObjectName("toolBtn");
     cancelBtn->setObjectName("toolBtn");
@@ -2383,13 +2637,13 @@ void MainWindow::onShowFavorites()
 
     if (m_favoriteLists.isEmpty()) {
         QMessageBox::information(this,
-            QString::fromUtf8("\xe3\x81\x8a\xe6\xb0\x97\xe3\x81\xab\xe5\x85\xa5\xe3\x82\x8a"),
-            QString::fromUtf8("\xe3\x81\x8a\xe6\xb0\x97\xe3\x81\xab\xe5\x85\xa5\xe3\x82\x8a\xe3\x81\xaf\xe3\x81\x82\xe3\x82\x8a\xe3\x81\xbe\xe3\x81\x9b\xe3\x82\x93"));
+            QObject::tr("お気に入り"),
+            QObject::tr("お気に入りはありません"));
         return;
     }
 
     QDialog *dlg = new QDialog(this);
-    dlg->setWindowTitle(QString::fromUtf8("\xe3\x81\x8a\xe6\xb0\x97\xe3\x81\xab\xe5\x85\xa5\xe3\x82\x8a\xe3\x83\xaa\xe3\x82\xb9\xe3\x83\x88"));
+    dlg->setWindowTitle(QObject::tr("お気に入りリスト"));
     dlg->resize(480, 420);
     QVBoxLayout *vl = new QVBoxLayout(dlg);
 
@@ -2434,11 +2688,11 @@ void MainWindow::onShowFavorites()
 
     // ── ボタン行
     QHBoxLayout *hl = new QHBoxLayout();
-    auto *openBtn   = new QPushButton(QString::fromUtf8("\xe9\x96\x8b\xe3\x81\x84\xe3\x81\xa6\xe5\x86\x8d\xe7\x94\x9f"));
-    auto *delBtn    = new QPushButton(QString::fromUtf8("\xe5\x89\x8a\xe9\x99\xa4"));
-    auto *renameBtn = new QPushButton(QString::fromUtf8("\xe3\x83\xaa\xe3\x82\xb9\xe3\x83\x88\xe5\x90\x8d\xe5\xa4\x89\xe6\x9b\xb4"));
-    auto *delListBtn= new QPushButton(QString::fromUtf8("\xe3\x83\xaa\xe3\x82\xb9\xe3\x83\x88\xe5\x89\x8a\xe9\x99\xa4"));
-    auto *closeBtn  = new QPushButton(QString::fromUtf8("\xe9\x96\x89\xe3\x81\x98\xe3\x82\x8b"));
+    auto *openBtn   = new QPushButton(QObject::tr("開いて再生"));
+    auto *delBtn    = new QPushButton(QObject::tr("削除"));
+    auto *renameBtn = new QPushButton(QObject::tr("リスト名変更"));
+    auto *delListBtn= new QPushButton(QObject::tr("リスト削除"));
+    auto *closeBtn  = new QPushButton(QObject::tr("閉じる"));
     for (auto *b : {openBtn, delBtn, renameBtn, delListBtn, closeBtn})
         b->setObjectName("toolBtn");
     hl->addWidget(openBtn); hl->addWidget(delBtn);
@@ -2473,8 +2727,8 @@ void MainWindow::onShowFavorites()
         if (m_activeListIndex >= m_favoriteLists.size()) return;
         bool ok;
         QString newName = QInputDialog::getText(dlg,
-            QString::fromUtf8("\xe3\x83\xaa\xe3\x82\xb9\xe3\x83\x88\xe5\x90\x8d\xe5\xa4\x89\xe6\x9b\xb4"),
-            QString::fromUtf8("\xe6\x96\xb0\xe3\x81\x97\xe3\x81\x84\xe5\x90\x8d\xe5\x89\x8d\xef\xbc\x9a"),
+            QObject::tr("リスト名変更"),
+            QObject::tr("新しい名前："),
             QLineEdit::Normal,
             m_favoriteLists[m_activeListIndex].name, &ok);
         if (ok && !newName.isEmpty()) {
@@ -2488,8 +2742,8 @@ void MainWindow::onShowFavorites()
     connect(delListBtn, &QPushButton::clicked, dlg, [this, dlg]() {
         if (m_favoriteLists.size() <= 1) {
             QMessageBox::warning(dlg,
-                QString::fromUtf8("\xe8\xad\xa6\xe5\x91\x8a"),
-                QString::fromUtf8("\xe6\x9c\x80\xe5\xbe\x8c\xe3\x81\xae\xe3\x83\xaa\xe3\x82\xb9\xe3\x83\x88\xe3\x81\xaf\xe5\x89\x8a\xe9\x99\xa4\xe3\x81\xa7\xe3\x81\x8d\xe3\x81\xbe\xe3\x81\x9b\xe3\x82\x93"));
+                QObject::tr("警告"),
+                QObject::tr("最後のリストは削除できません"));
             return;
         }
         m_favoriteLists.removeAt(m_activeListIndex);
@@ -2780,7 +3034,7 @@ void MainWindow::loadFavorites()
         if (inFav && line.contains("|")) {
             if (m_favoriteLists.isEmpty()) {
                 FavoriteList fl;
-                fl.name = QString::fromUtf8("\xe3\x83\xaa\xe3\x82\xb9\xe3\x83\x88") + "1";
+                fl.name = QObject::tr("リスト") + "1";
                 m_favoriteLists.append(fl);
             }
             int sep = line.indexOf("|");
@@ -2791,7 +3045,7 @@ void MainWindow::loadFavorites()
     // リストが空なら初期リストを作成
     if (m_favoriteLists.isEmpty()) {
         FavoriteList fl;
-        fl.name = QString::fromUtf8("\xe3\x83\xaa\xe3\x82\xb9\xe3\x83\x88") + "1";
+        fl.name = QObject::tr("リスト") + "1";
         m_favoriteLists.append(fl);
     }
     // v10: DoPをONにした出力デバイスを復元し、今のデバイスに合わせてメニューを更新
@@ -2841,9 +3095,9 @@ void MainWindow::loadFavorites()
     // DSP OFFが保存されていた場合はモードボタンを起動時に復元
     if (m_player && m_player->dspOff()) {
         QMap<QString,QString> dspOffLabels;
-        dspOffLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4  \xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
-        dspOffLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc" "DSD x8  \xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
-        dspOffLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9  \xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
+        dspOffLabels["hires4"]   = QObject::tr("ハイレゾ x4  （使用不可）");
+        dspOffLabels["dsd8"]     = QObject::tr("疑似DSD x8  （使用不可）");
+        dspOffLabels["loudness"] = QObject::tr("ラウドネス  （使用不可）");
         for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
             it.value()->setEnabled(it.key() == "pure");
             it.value()->setChecked(it.key() == "pure");
@@ -2873,8 +3127,7 @@ void MainWindow::loadFavorites()
                 CloseHandle(sei.hProcess);
                 // ステータスバーにメッセージ表示（5秒後に消える）
                 if (m_statusBar) {
-                    m_statusBar->setText(QString::fromUtf8(
-                        "\xe9\x9b\xbb\xe6\xba\x90\xe3\x83\x97\xe3\x83\xa9\xe3\x83\xb3\xe3\x82\x92\xe4\xbb\xa5\xe5\x89\x8d\xe3\x81\xae\xe8\xa8\xad\xe5\xae\x9a\xe3\x81\xab\xe6\x88\xbb\xe3\x81\x97\xe3\x81\xbe\xe3\x81\x97\xe3\x81\x9f\xe3\x80\x82"));
+                    m_statusBar->setText(QObject::tr("電源プランを以前の設定に戻しました。"));
                     QTimer::singleShot(5000, this, [this]() {
                         if (m_statusBar) m_statusBar->setText(" ");
                     });
@@ -2924,12 +3177,9 @@ void MainWindow::onSleepTimer()
             prevMin = item.minutes;
         }
         QString actionLabel = (item.action == 1)
-            ? QString::fromUtf8("\xe3\x82\xb9\xe3\x83\xaa\xe3\x83\xbc\xe3\x83\x97")
-            : QString::fromUtf8("\xe3\x82\xb7\xe3\x83\xa3\xe3\x83\x83\xe3\x83\x88\xe3\x83\x80\xe3\x82\xa6\xe3\x83\xb3");
-        QString label = QString("%1").arg(item.minutes)
-                + QString::fromUtf8("\xe5\x88\x86\xef\xbc\x88")
-                + actionLabel
-                + QString::fromUtf8("\xef\xbc\x89");
+            ? QObject::tr("スリープ")
+            : QObject::tr("シャットダウン");
+        QString label = QObject::tr("%1分（%2）").arg(item.minutes).arg(actionLabel);
 
         int min = item.minutes;
         int act = item.action;
@@ -2955,8 +3205,8 @@ void MainWindow::onSleepTimer()
             });
             m_sleepTimer->start(1000);
             QString actionLabel2 = (act == 1)
-                ? QString::fromUtf8("\xe3\x82\xb9\xe3\x83\xaa\xe3\x83\xbc\xe3\x83\x97")
-                : QString::fromUtf8("\xe3\x82\xb7\xe3\x83\xa3\xe3\x83\x83\xe3\x83\x88\xe3\x83\x80\xe3\x82\xa6\xe3\x83\xb3");
+                ? QObject::tr("スリープ")
+                : QObject::tr("シャットダウン");
             m_sleepBtn->setText(QString("%1:00 ").arg(min, 2, 10, QChar('0')) + actionLabel2);
         });
         a->setCheckable(true);
@@ -3031,12 +3281,10 @@ void MainWindow::filterAlbumCards(const QString &query)
 
     if (tokens.isEmpty())
         m_albumFooterLabel->setText(
-            QString("%1 %2").arg(m_albumCards.size())
-                .arg(jp("\xe3\x82\xa2\xe3\x83\xab\xe3\x83\x90\xe3\x83\xa0 \xe2\x80\x94 \xe3\x82\xaf\xe3\x83\xaa\xe3\x83\x83\xe3\x82\xaf\xe3\x81\xa7\xe8\xaa\xad\xe3\x81\xbf\xe8\xbe\xbc\xe3\x82\x93\xe3\x81\xa7\xe5\x86\x8d\xe7\x94\x9f")));
+            QObject::tr("%1 アルバム — クリックで読み込んで再生").arg(m_albumCards.size()));
     else
         m_albumFooterLabel->setText(
-            QString("%1 / %2 %3").arg(shown).arg(m_albumCards.size())
-                .arg(jp("\xe3\x82\xa2\xe3\x83\xab\xe3\x83\x90\xe3\x83\xa0")));
+            QObject::tr("%1 / %2 アルバム").arg(shown).arg(m_albumCards.size()));
 }
 
 // ── 現在の電源プランGUIDを取得
@@ -3082,6 +3330,49 @@ static bool writeRegDword(HKEY root, const QString &path, const QString &name, D
     return ok;
 }
 
+// DSP完全バイパス（設定画面の「DSP OFF」とリモコンの共通処理）
+void MainWindow::applyDspOff(bool off)
+{
+    m_player->setDspOff(off);
+    QMap<QString,QString> dspOffLabels;
+    dspOffLabels["hires4"]   = QObject::tr("ハイレゾ x4  （使用不可）");
+    dspOffLabels["dsd8"]     = QObject::tr("疑似DSD x8  （使用不可）");
+    dspOffLabels["loudness"] = QObject::tr("ラウドネス  （使用不可）");
+    QMap<QString,QString> origLabels;
+    origLabels["hires4"]   = QObject::tr("ハイレゾ x4");
+    origLabels["dsd8"]     = QObject::tr("疑似DSD x8");
+    origLabels["loudness"] = QObject::tr("ラウドネス");
+    for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
+        bool enabled = !off || it.key() == "pure";
+        it.value()->setEnabled(enabled);
+        if (it.key() != "pure") {
+            if (off && dspOffLabels.contains(it.key()))
+                it.value()->setText(dspOffLabels[it.key()]);
+            else if (origLabels.contains(it.key()))
+                it.value()->setText(origLabels[it.key()]);
+        }
+    }
+    if (off) {
+        for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it)
+            it.value()->setChecked(it.key() == "pure");
+        m_soundField = "";
+        m_player->setChainOn(false);
+        if (m_hp1Btn) { m_hp1On = false; m_hp1Btn->setChecked(false); m_hp1Btn->setEnabled(false); }
+        if (m_hp2Btn) { m_hp2On = false; m_hp2Btn->setChecked(false); m_hp2Btn->setEnabled(false); }
+        m_player->setMode("pure", false, false, "");
+        updateModeDesc("pure");
+    } else {
+        if (m_hp1Btn) m_hp1Btn->setEnabled(true);
+        if (m_hp2Btn) m_hp2Btn->setEnabled(true);
+        // DSP OFFにした時点でチェーンもOFFにしているので、チェーンは今の設定のまま
+        // （以前は設定画面のチェックボックスの状態で復元していた。値は同じ）
+        m_player->setChainOn(m_player->chainOn());
+        // モード・HP・音場もまとめて再適用（setDspOff(false) だけでは不十分）
+        m_player->setMode(currentMode(), m_hp1On, m_hp2On, m_soundField);
+    }
+    scheduleSave();
+}
+
 void MainWindow::showSettings()
 {
     QDialog *dlg = new QDialog(this);
@@ -3108,22 +3399,22 @@ void MainWindow::showSettings()
     row1->setSpacing(10);
 
     // ── 電源プラン
-    auto *grpPower = new QGroupBox("\xe9\x9b\xbb\xe6\xba\x90\xe3\x83\x97\xe3\x83\xa9\xe3\x83\xb3");
+    auto *grpPower = new QGroupBox(QObject::tr("電源プラン"));
     auto *pvl = new QVBoxLayout(grpPower);
     // 電源プランの表示：INI保存値を優先、なければ現在値
     QString curPlan = m_savedPowerPlan.isEmpty()
                       ? getCurrentPowerPlan().toLower()
                       : m_savedPowerPlan.toLower();
-    auto *rbHigh    = new QRadioButton("\xe9\xab\x98\xe3\x83\x91\xe3\x83\x95\xe3\x82\xa9\xe3\x83\xbc\xe3\x83\x9e\xe3\x83\xb3\xe3\x82\xb9\xef\xbc\x88\xe3\x83\x87\xe3\x82\xb9\xe3\x82\xaf\xe3\x83\x88\xe3\x83\x83\xe3\x83\x97\xe6\x8e\xa8\xe5\xa5\xa8\xef\xbc\x89");
-    auto *rbBalance = new QRadioButton(QString::fromUtf8("\xe3\x83\x90\xe3\x83\xa9\xe3\x83\xb3\xe3\x82\xb9\xef\xbc\x88\xe3\x83\x8e\xe3\x83\xbc\xe3\x83\x88") + "PC" + QString::fromUtf8("\xe6\x8e\xa8\xe5\xa5\xa8\xef\xbc\x89"));
-    auto *rbSaver   = new QRadioButton("\xe7\x9c\x81\xe9\x9b\xbb\xe5\x8a\x9b");
+    auto *rbHigh    = new QRadioButton(QObject::tr("高パフォーマンス（デスクトップ推奨）"));
+    auto *rbBalance = new QRadioButton(QObject::tr("バランス（ノートPC推奨）"));
+    auto *rbSaver   = new QRadioButton(QObject::tr("省電力"));
     if (curPlan.contains("8c5e7fda")) rbHigh->setChecked(true);
     else if (curPlan.contains("381b4222")) rbBalance->setChecked(true);
     else rbSaver->setChecked(true);
     pvl->addWidget(rbHigh);
     pvl->addWidget(rbBalance);
     pvl->addWidget(rbSaver);
-    auto *applyPowerBtn = new QPushButton("\xe9\x9b\xbb\xe6\xba\x90\xe3\x83\x97\xe3\x83\xa9\xe3\x83\xb3\xe3\x82\x92\xe5\xa4\x89\xe6\x9b\xb4\xef\xbc\x88\xe7\xae\xa1\xe7\x90\x86\xe8\x80\x85\xe6\xa8\xa9\xe9\x99\x90\xe3\x81\x8c\xe5\xbf\x85\xe8\xa6\x81\xef\xbc\x89");
+    auto *applyPowerBtn = new QPushButton(QObject::tr("電源プランを変更（管理者権限が必要）"));
     applyPowerBtn->setObjectName("toolBtn");
     pvl->addWidget(applyPowerBtn);
     pvl->addStretch();
@@ -3142,32 +3433,32 @@ void MainWindow::showSettings()
             WaitForSingleObject(sei.hProcess, 3000);
             CloseHandle(sei.hProcess);
             m_savedPowerPlan = guid;  // メンバ変数に保存
-            QMessageBox::information(dlg, QString::fromUtf8("\xe5\xae\x8c\xe4\xba\x86"),
-                QString::fromUtf8("\xe9\x9b\xbb\xe6\xba\x90\xe3\x83\x97\xe3\x83\xa9\xe3\x83\xb3\xe3\x82\x92\xe5\xa4\x89\xe6\x9b\xb4\xe3\x81\x97\xe3\x81\xbe\xe3\x81\x97\xe3\x81\x9f\xe3\x80\x82"));
+            QMessageBox::information(dlg, QObject::tr("完了"),
+                QObject::tr("電源プランを変更しました。"));
             scheduleSave();  // 電源プランをINIに保存
         } else {
-            QMessageBox::warning(dlg, QString::fromUtf8("\xe3\xa8\xa8\xe3\x83\xa9\xe3\x83\xbc"),
-                QString::fromUtf8("\xe5\xa4\x89\xe6\x9b\xb4\xe3\x81\xab\xe5\xa4\xb1\xe6\x95\x97\xe3\x81\x97\xe3\x81\xbe\xe3\x81\x97\xe3\x81\x9f\xe3\x80\x82"));
+            QMessageBox::warning(dlg, QObject::tr("エラー"),
+                QObject::tr("変更に失敗しました。"));
         }
     });
     row1->addWidget(grpPower, 1);
 
     // ── USB最適化
-    auto *grpUsb = new QGroupBox("USB\xe6\x9c\x80\xe9\x81\xa9\xe5\x8c\x96\xef\xbc\x88\xe7\xae\xa1\xe7\x90\x86\xe8\x80\x85\xe6\xa8\xa9\xe9\x99\x90\xe3\x81\x8c\xe5\xbf\x85\xe8\xa6\x81\xef\xbc\x89");
+    auto *grpUsb = new QGroupBox(QObject::tr("USB最適化（管理者権限が必要）"));
     auto *uvl = new QVBoxLayout(grpUsb);
     DWORD suspendVal = readRegDword(HKEY_LOCAL_MACHINE,
         "SYSTEM\\CurrentControlSet\\Services\\USB",
         "DisableSelectiveSuspend", 0);
-    auto *cbSuspend = new QCheckBox(QString::fromUtf8("USB\xe3\x82\xbb\xe3\x83\xac\xe3\x82\xaf\xe3\x83\x86\xe3\x82\xa3\xe3\x83\x96\xe3\x82\xb5\xe3\x82\xb9\xe3\x83\x9a\xe3\x83\xb3\xe3\x83\x89\xe3\x82\x92\xe7\x84\xa1\xe5\x8a\xb9\xe5\x8c\x96\xef\xbc\x88") + "USB" + QString::fromUtf8("\xe9\x9b\xbb\xe6\xba\x90\xe3\x82\x92\xe5\xae\x89\xe5\xae\x9a\xe3\x81\x95\xe3\x81\x9b\xe3\x82\x8b\xef\xbc\x89"));
+    auto *cbSuspend = new QCheckBox(QObject::tr("USBセレクティブサスペンドを無効化（USB電源を安定させる）"));
     cbSuspend->setChecked(suspendVal == 1);
     uvl->addWidget(cbSuspend);
     DWORD fastBoot = readRegDword(HKEY_LOCAL_MACHINE,
         "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power",
         "HiberbootEnabled", 1);
-    auto *cbFastBoot = new QCheckBox(QString::fromUtf8("\xe9\xab\x98\xe9\x80\x9f\xe3\x82\xb9\xe3\x82\xbf\xe3\x83\xbc\xe3\x83\x88\xe3\x82\xa2\xe3\x83\x83\xe3\x83\x97\xe3\x82\x92\xe7\x84\xa1\xe5\x8a\xb9\xe5\x8c\x96\xef\xbc\x88") + "USB" + QString::fromUtf8("\xe5\x88\x9d\xe6\x9c\x9f\xe5\x8c\x96\xe3\x82\x92\xe6\xad\xa3\xe5\xb8\xb8\xe5\x8c\x96\xe3\x81\x99\xe3\x82\x8b\xef\xbc\x89"));
+    auto *cbFastBoot = new QCheckBox(QObject::tr("高速スタートアップを無効化（USB初期化を正常化する）"));
     cbFastBoot->setChecked(fastBoot == 0);
     uvl->addWidget(cbFastBoot);
-    auto *applyUsbBtn = new QPushButton("USB\xe8\xa8\xad\xe5\xae\x9a\xe3\x82\x92\xe9\x81\xa9\xe7\x94\xa8\xef\xbc\x88\xe7\xae\xa1\xe7\x90\x86\xe8\x80\x85\xe6\xa8\xa9\xe9\x99\x90\xe3\x81\x8c\xe5\xbf\x85\xe8\xa6\x81\xef\xbc\x89");
+    auto *applyUsbBtn = new QPushButton(QObject::tr("USB設定を適用（管理者権限が必要）"));
     applyUsbBtn->setObjectName("toolBtn");
     uvl->addWidget(applyUsbBtn);
     uvl->addStretch();
@@ -3193,8 +3484,8 @@ void MainWindow::showSettings()
         runReg(QString::fromLatin1(
             "add HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power"
             " /v HiberbootEnabled /t REG_DWORD /d %1 /f").arg(fastBootD));
-        QMessageBox::information(dlg, "\xe5\xae\x8c\xe4\xba\x86",
-            "USB\xe8\xa8\xad\xe5\xae\x9a\xe3\x82\x92\xe9\x81\xa9\xe7\x94\xa8\xe3\x81\x97\xe3\x81\xbe\xe3\x81\x97\xe3\x81\x9f\xe3\x80\x82\n\xe4\xb8\x80\xe9\x83\xa8\xe3\x81\xae\xe8\xa8\xad\xe5\xae\x9a\xe3\x81\xaf\xe5\x86\x8d\xe8\xb5\xb7\xe5\x8b\x95\xe5\xbe\x8c\xe3\x81\xab\xe6\x9c\x89\xe5\x8a\xb9\xe3\x81\xab\xe3\x81\xaa\xe3\x82\x8a\xe3\x81\xbe\xe3\x81\x99\xe3\x80\x82");
+        QMessageBox::information(dlg, QObject::tr("完了"),
+            QObject::tr("USB設定を適用しました。\n一部の設定は再起動後に有効になります。"));
     });
     row1->addWidget(grpUsb, 1);
     vl->addLayout(row1);
@@ -3204,24 +3495,22 @@ void MainWindow::showSettings()
     row2->setSpacing(10);
 
     // ── 中密度チェーン
-    auto *grpChain = new QGroupBox(QString::fromUtf8("\xe4\xb8\xad\xe5\xaf\x86\xe5\xba\xa6\xe3\x83\x81\xe3\x82\xa7\xe3\x83\xbc\xe3\x83\xb3"));
+    auto *grpChain = new QGroupBox(QObject::tr("中密度チェーン"));
     auto *cvl = new QVBoxLayout(grpChain);
     cvl->setSpacing(4);
     auto *cbChainOff = new QCheckBox(
-        QString::fromUtf8("\xe4\xb8\xad\xe5\xaf\x86\xe5\xba\xa6\xe3\x83\x81\xe3\x82\xa7\xe3\x83\xbc\xe3\x83\xb3\xe3\x82\x92\xe6\x9c\x89\xe5\x8a\xb9\xe3\x81\xab\xe3\x81\x99\xe3\x82\x8b\xef\xbc\x88")
-        + "Always Player "
-        + QString::fromUtf8("\xe6\x8e\xa8\xe5\xa5\xa8\xe8\xa8\xad\xe5\xae\x9a\xef\xbc\x89"));
+        QObject::tr("中密度チェーンを有効にする（Always Player 推奨設定）"));
     cbChainOff->setChecked(m_player->chainOn());
     QString chainText =
-        QString::fromUtf8("  \xe3\x83\x97\xe3\x83\xac\xe3\x82\xbc\xe3\x83\xb3\xe3\x82\xb9\xe6\x95\xb4\xe5\x90\x88")
+        QObject::tr("  プレゼンス整合")
         + "(3.2kHz)\n\n  "
-        + QString::fromUtf8("\xe4\xbd\x8d\xe7\x9b\xb8\xe6\x95\xb4\xe5\x90\x88")
+        + QObject::tr("位相整合")
         + "(allpass 8kHz)\n\n  "
-        + QString::fromUtf8("\xe7\xa9\xba\xe8\x8a\xaf\xe3\x82\xb3\xe3\x82\xa4\xe3\x83\xab\xe7\x89\xb9\xe6\x80\xa7")
+        + QObject::tr("空芯コイル特性")
         + "(lowpass 45kHz / poles=1)\n\n  "
-        + QString::fromUtf8("\xe5\x81\xb6\xe6\x95\xb0\xe6\xac\xa1\xe9\xab\x98\xe8\xaa\xbf\xe6\xb3\xa2")
+        + QObject::tr("偶数次高調波")
         + "("
-        + QString::fromUtf8("\xe4\xbf\x82\xe6\x95\xb0")
+        + QObject::tr("係数")
         + " 0.03)";
     auto *chainDetail = new QLabel(chainText);
     chainDetail->setObjectName("infoLabel");
@@ -3236,16 +3525,80 @@ void MainWindow::showSettings()
     row2->addWidget(grpChain, 1);
 
     // ── 音場効果
-    auto *grpSound = new QGroupBox(QString::fromUtf8("\xe9\x9f\xb3\xe9\x9f\xbf\xe8\xa8\xad\xe5\xae\x9a\xef\xbc\x88\xe3\x82\xaa\xe3\x83\x97\xe3\x82\xb7\xe3\x83\xa7\xe3\x83\xb3\xef\xbc\x89"));
+    auto *grpSound = new QGroupBox(QObject::tr("音響設定（オプション）"));
     auto *svl = new QVBoxLayout(grpSound);
     svl->setSpacing(4);
-    auto *cbWow  = new QCheckBox(QString::fromUtf8("\xe3\x83\xaf\xe3\x82\xa6\xe3\x83\x95\xe3\x83\xa9\xe3\x83\x83\xe3\x82\xbf\xe3\x83\xbc\xef\xbc\x88\xe3\x82\xa2\xe3\x83\x8a\xe3\x83\xad\xe3\x82\xb0\xe3\x83\xac\xe3\x82\xb3\xe3\x83\xbc\xe3\x83\x89\xe5\x8c\x96\xef\xbc\x89"));
-    auto *cbHall = new QCheckBox(QString::fromUtf8("\xe3\x83\x9b\xe3\x83\xbc\xe3\x83\xab\xe3\x83\x88\xe3\x83\xbc\xe3\x83\xb3\xef\xbc\x88\xe3\x83\x8b\xe3\x82\xa2\xe3\x83\x95\xe3\x82\xa3\xe3\x83\xbc\xe3\x83\xab\xe3\x83\x89\xe5\xbc\xb7\xe5\x8c\x96\xef\xbc\x89"));
+    auto *cbWow  = new QCheckBox(QObject::tr("ワウフラッター（アナログレコード化）"));
+    auto *cbHall = new QCheckBox(QObject::tr("ホールトーン（ニアフィールド強化）"));
     if (m_soundField == "wowflutter") cbWow->setChecked(true);
     else if (m_soundField == "halltone") cbHall->setChecked(true);
     svl->addWidget(cbWow);
     svl->addWidget(cbHall);
     svl->addStretch();
+    // ★ v10: 表示言語。初期値は「自動」＝Windowsの表示言語が日本語なら日本語、それ以外は英語。
+    //   言語の切り替えは次回起動時に反映する（起動時にmain.cppで翻訳を読み込むため）。
+    {
+        auto *langRow = new QHBoxLayout();
+        langRow->addWidget(new QLabel(QStringLiteral("言語 / Language")));
+        auto *cbLang = new QComboBox();
+        cbLang->addItem(QObject::tr("自動（Windowsの言語に合わせる）"), QStringLiteral("auto"));
+        cbLang->addItem(QStringLiteral("日本語"),  QStringLiteral("ja"));
+        cbLang->addItem(QStringLiteral("English"), QStringLiteral("en"));
+        const QString curLang = iniReadValue(QStringLiteral("ui"), QStringLiteral("lang"));
+        const int idx = cbLang->findData(curLang.isEmpty() ? QStringLiteral("auto") : curLang);
+        cbLang->setCurrentIndex(idx >= 0 ? idx : 0);
+        langRow->addWidget(cbLang, 1);
+        svl->addLayout(langRow);
+
+        // ★ v10: 出力方式（WASAPI排他 / ASIO）。ASIOはパソコンに登録されているメーカー製ドライバから選ぶ
+        //   （ASIO4ALLなどWDMを包むタイプはPlayer::asioDrivers()の段階で除外済み）。
+        auto *outRow = new QHBoxLayout();
+        outRow->addWidget(new QLabel(QObject::tr("出力")));
+        auto *cbOut = new QComboBox();
+        cbOut->addItem(QObject::tr("WASAPI 排他（標準）"), QStringLiteral("wasapi"));
+        for (const QString &d : Player::asioDrivers())
+            cbOut->addItem(QStringLiteral("ASIO: ") + d, QStringLiteral("asio:") + d);
+        const QString curOut = m_player->usingAsio()
+            ? QStringLiteral("asio:") + m_player->asioDriverName() : QStringLiteral("wasapi");
+        const int oi = cbOut->findData(curOut);
+        cbOut->setCurrentIndex(oi >= 0 ? oi : 0);
+        outRow->addWidget(cbOut, 1);
+        auto *asioPanelBtn = new QPushButton(QObject::tr("ASIO設定"));
+        asioPanelBtn->setObjectName("toolBtn");
+        asioPanelBtn->setEnabled(m_player->usingAsio());
+        outRow->addWidget(asioPanelBtn);
+        svl->addLayout(outRow);
+        connect(cbOut, &QComboBox::activated, dlg, [this, cbOut, asioPanelBtn](int) {
+            const QString v = cbOut->currentData().toString();
+            const bool asio = v.startsWith(QLatin1String("asio:"));
+            iniWriteValue(QStringLiteral("output"), QStringLiteral("backend"), v);
+            m_player->setOutputBackend(asio, asio ? v.mid(5) : QString());
+            asioPanelBtn->setEnabled(asio);
+        });
+        connect(asioPanelBtn, &QPushButton::clicked, dlg, [this, dlg]() {
+            if (!m_player->openAsioControlPanel())
+                QMessageBox::information(dlg, QStringLiteral("Always Player"),
+                    QObject::tr("このASIOドライバには設定画面がありません。"));
+        });
+        // ★ v10: ジャケット画像のネット取得（既定はオン）
+        auto *cbCover = new QCheckBox(QObject::tr("ジャケット画像が無いときはインターネットから取得する"));
+        cbCover->setToolTip(QObject::tr("アーティスト名とアルバム名で iTunes と MusicBrainz を検索します。\n"
+                                        "取得した画像はアプリ内に保存し、曲ファイルは変更しません。"));
+        cbCover->setChecked(AlbumArt::onlineEnabled());
+        svl->addWidget(cbCover);
+        connect(cbCover, &QCheckBox::toggled, dlg, [this](bool on) {
+            AlbumArt::setOnlineEnabled(on);
+            if (on) {
+                m_coverTried.clear();
+                if (!m_hasArtwork) requestOnlineCover(m_player->currentFilePath());
+            }
+        });
+        connect(cbLang, &QComboBox::activated, dlg, [dlg, cbLang](int) {
+            iniWriteValue(QStringLiteral("ui"), QStringLiteral("lang"), cbLang->currentData().toString());
+            QMessageBox::information(dlg, QStringLiteral("Always Player"),
+                QStringLiteral("次回起動時に反映されます。\nThe new language will be applied after restarting Always Player."));
+        });
+    }
     connect(cbWow, &QCheckBox::clicked, this, [this, cbWow, cbHall](bool checked){
         if (checked) { cbHall->setChecked(false); m_soundField = "wowflutter"; }
         else m_soundField = "";
@@ -3262,68 +3615,30 @@ void MainWindow::showSettings()
     vl->addLayout(row2);
 
     // ══ 3行目：DSP完全バイパス（全幅）══
-    auto *grpDsp = new QGroupBox(QString::fromUtf8("DSP\xe5\xae\x8c\xe5\x85\xa8\xe3\x83\x90\xe3\x82\xa4\xe3\x83\x91\xe3\x82\xb9"));
+    auto *grpDsp = new QGroupBox(QObject::tr("DSP完全バイパス"));
     auto *dvl = new QHBoxLayout(grpDsp);
     auto *cbDspOff = new QCheckBox(
-        QString::fromUtf8("DSP OFF\xef\xbc\x88\xe3\x82\xa2\xe3\x83\x83\xe3\x83\x97\xe3\x82\xb5\xe3\x83\xb3\xe3\x83\x97\xe3\x83\xaa\xe3\x83\xb3\xe3\x82\xb0\xe3\x83\xbb\xe4\xb8\xad\xe5\xaf\x86\xe5\xba\xa6\xe3\x83\x81\xe3\x82\xa7\xe3\x83\xbc\xe3\x83\xb3\xe3\x82\x92\xe3\x81\x99\xe3\x81\xb9\xe3\x81\xa6\xe7\x84\xa1\xe5\x8a\xb9\xe3\x81\xab\xe3\x81\x99\xe3\x82\x8b\xef\xbc\x89"));
+        QObject::tr("DSP OFF（アップサンプリング・中密度チェーンをすべて無効にする）"));
     cbDspOff->setChecked(m_player->dspOff());
     QString dspDescText =
-        "OFF" + QString::fromUtf8("\xe3\x81\xab\xe3\x81\x99\xe3\x82\x8b\xe3\x81\xa8\xe3\x82\xbd\xe3\x83\xbc\xe3\x82\xb9\xe4\xbf\xa1\xe5\x8f\xb7\xe3\x82\x92\xe3\x81\x9d\xe3\x81\xae\xe3\x81\xbe\xe3\x81\xbe")
-        + "DAC"
-        + QString::fromUtf8("\xe3\x81\xab\xe9\x80\x81\xe3\x82\x8b\xe6\x9c\x80\xe7\x9f\xad\xe7\xb5\x8c\xe8\xb7\xaf\xe3\x81\xab\xe3\x81\xaa\xe3\x82\x8a\xe3\x81\xbe\xe3\x81\x99\xe3\x80\x82\n")
-        + QString::fromUtf8("\xe3\x83\x93\xe3\x83\x83\xe3\x83\x88\xe3\x83\x91\xe3\x83\xbc\xe3\x83\x95\xe3\x82\xa7\xe3\x82\xaf\xe3\x83\x88\xe5\x87\xba\xe5\x8a\x9b\xe3\x81\xa8\xe7\xb5\x84\xe3\x81\xbf\xe5\x90\x88\xe3\x82\x8f\xe3\x81\x9b\xe3\x82\x8b\xe3\x81\xa8\xe5\xae\x8c\xe5\x85\xa8\xe3\x81\xaa\xe3\x83\x90\xe3\x82\xa4\xe3\x83\x91\xe3\x82\xb9\xe5\x86\x8d\xe7\x94\x9f\xe3\x81\x8c\xe5\x8f\xaf\xe8\x83\xbd\xe3\x81\xa7\xe3\x81\x99\xe3\x80\x82");
+        QObject::tr("OFFにするとソース信号をそのままDACに送る最短経路になります。\n"
+                    "ビットパーフェクト出力と組み合わせると完全なバイパス再生が可能です。");
     auto *dspDesc = new QLabel(dspDescText);
     dspDesc->setObjectName("infoLabel");
     dspDesc->setWordWrap(true);
     dvl->addWidget(cbDspOff);
     dvl->addWidget(dspDesc, 1);
     connect(cbDspOff, &QCheckBox::clicked, this, [this, cbChainOff, cbWow, cbHall](bool checked) {
-        m_player->setDspOff(checked);
-        QMap<QString,QString> dspOffLabels;
-        dspOffLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4  \xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
-        dspOffLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc" "DSD x8  \xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
-        dspOffLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9  \xef\xbc\x88\xe4\xbd\xbf\xe7\x94\xa8\xe4\xb8\x8d\xe5\x8f\xaf\xef\xbc\x89");
-        QMap<QString,QString> origLabels;
-        origLabels["hires4"]   = jp("\xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe x4");
-        origLabels["dsd8"]     = jp("\xe7\x96\x91\xe4\xbc\xbc") + "DSD x8";
-        origLabels["loudness"] = jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9");
-        for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it) {
-            bool enabled = !checked || it.key() == "pure";
-            it.value()->setEnabled(enabled);
-            if (it.key() != "pure") {
-                if (checked && dspOffLabels.contains(it.key()))
-                    it.value()->setText(dspOffLabels[it.key()]);
-                else if (origLabels.contains(it.key()))
-                    it.value()->setText(origLabels[it.key()]);
-            }
-        }
-        if (checked) {
-            for (auto it = m_modeBtns.begin(); it != m_modeBtns.end(); ++it)
-                it.value()->setChecked(it.key() == "pure");
-            m_soundField = "";
-            cbWow->setChecked(false);
-            cbHall->setChecked(false);
-            m_player->setChainOn(false);
-            cbChainOff->setChecked(false);
-            if (m_hp1Btn) { m_hp1On = false; m_hp1Btn->setChecked(false); m_hp1Btn->setEnabled(false); }
-            if (m_hp2Btn) { m_hp2On = false; m_hp2Btn->setChecked(false); m_hp2Btn->setEnabled(false); }
-            m_player->setMode("pure", false, false, "");
-            updateModeDesc("pure");
-        } else {
-            // ★ DSP OFF 解除 → cbChainOff の現在状態でチェーンを復元
-            if (m_hp1Btn) m_hp1Btn->setEnabled(true);
-            if (m_hp2Btn) m_hp2Btn->setEnabled(true);
-            bool chainShouldBeOn = cbChainOff->isChecked();
-            m_player->setChainOn(chainShouldBeOn);
-            // モード・HP・音場もまとめて再適用（setDspOff(false) だけでは不十分）
-            m_player->setMode(currentMode(), m_hp1On, m_hp2On, m_soundField);
-        }
-        scheduleSave();
+        applyDspOff(checked);
+        // 画面のチェックボックスを実際の状態に合わせる
+        cbChainOff->setChecked(m_player->chainOn());
+        cbWow->setChecked(m_soundField == "wowflutter");
+        cbHall->setChecked(m_soundField == "halltone");
     });
     vl->addWidget(grpDsp);
     
     // ── デフォルトに戻す
-    auto *resetBtn = new QPushButton(QString::fromUtf8("\xe3\x81\x99\xe3\x81\xb9\xe3\x81\xa6\xe3\x82\x92\xe3\x83\x87\xe3\x83\x95\xe3\x82\xa9\xe3\x83\xab\xe3\x83\x88\xe3\x81\xab\xe6\x88\xbb\xe3\x81\x99"));
+    auto *resetBtn = new QPushButton(QObject::tr("すべてをデフォルトに戻す"));
     resetBtn->setObjectName("toolBtn");
     connect(resetBtn, &QPushButton::clicked, dlg, [=]() {
         SHELLEXECUTEINFOW seiR = {};
@@ -3355,8 +3670,8 @@ void MainWindow::showSettings()
         rbBalance->setChecked(true);
         cbSuspend->setChecked(false);
         cbFastBoot->setChecked(false);
-        QMessageBox::information(dlg, "\xe5\xae\x8c\xe4\xba\x86",
-            "\xe3\x81\x99\xe3\x81\xb9\xe3\x81\xa6\xe3\x82\x92\xe3\x83\x87\xe3\x83\x95\xe3\x82\xa9\xe3\x83\xab\xe3\x83\x88\xe3\x81\xab\xe6\x88\xbb\xe3\x81\x97\xe3\x81\xbe\xe3\x81\x97\xe3\x81\x9f\xe3\x80\x82\n\xe5\x86\x8d\xe8\xb5\xb7\xe5\x8b\x95\xe3\x82\x92\xe3\x81\x8a\xe5\x8b\xa7\xe3\x82\x81\xe3\x81\x97\xe3\x81\xbe\xe3\x81\x99\xe3\x80\x82");
+        QMessageBox::information(dlg, QObject::tr("完了"),
+            QObject::tr("すべてをデフォルトに戻しました。\n再起動をお勧めします。"));
     });
 
     // ── About
@@ -3380,7 +3695,7 @@ void MainWindow::showSettings()
     vl->addWidget(aboutLabel);
 
     // ── 閉じる＋デフォルトに戻す（スクロール外・中央揃え）
-    auto *closeBtn = new QPushButton(QString::fromUtf8("\xe9\x96\x89\xe3\x81\x98\xe3\x82\x8b"));
+    auto *closeBtn = new QPushButton(QObject::tr("閉じる"));
     closeBtn->setObjectName("toolBtn");
     closeBtn->setFixedHeight(36);
     connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::accept);
@@ -3403,13 +3718,13 @@ void MainWindow::updateModeDesc(const QString &mode)
 {
     if (!m_modeDesc) return;
     if (mode == "pure")
-        m_modeDesc->setText(jp("\xe3\x83\x94\xe3\x83\xa5\xe3\x82\xa2\xe3\x83\xa2\xe3\x83\xbc\xe3\x83\x89 / \xe3\x82\xbd\xe3\x83\xbc\xe3\x82\xb9\xe5\xbf\xa0\xe5\xae\x9f\xe5\x86\x8d\xe7\x94\x9f"));
+        m_modeDesc->setText(QObject::tr("ピュアモード / ソース忠実再生"));
     else if (mode == "hires4")
-        m_modeDesc->setText(jp("4\xe5\x80\x8d\xe3\x82\xa2\xe3\x83\x83\xe3\x83\x97\xe3\x82\xb5\xe3\x83\xb3\xe3\x83\x97\xe3\x83\xaa\xe3\x83\xb3\xe3\x82\xb0 / \xe3\x83\x8f\xe3\x82\xa4\xe3\x83\xac\xe3\x82\xbe\xe5\x87\xba\xe5\x8a\x9b"));
+        m_modeDesc->setText(QObject::tr("4倍アップサンプリング / ハイレゾ出力"));
     else if (mode == "dsd8")
-        m_modeDesc->setText(jp("8\xe5\x80\x8d\xe3\x82\xa2\xe3\x83\x83\xe3\x83\x97\xe3\x82\xb5\xe3\x83\xb3\xe3\x83\x97\xe3\x83\xaa\xe3\x83\xb3\xe3\x82\xb0 / \xe3\x83\x8e\xe3\x82\xa4\xe3\x82\xba\xe3\x82\xb7\xe3\x82\xa7\xe3\x83\xbc\xe3\x83\x94\xe3\x83\xb3\xe3\x82\xb0 / \xe7\x96\x91\xe4\xbc\xbc" "DSD"));
+        m_modeDesc->setText(QObject::tr("8倍アップサンプリング / ノイズシェーピング / 疑似DSD"));
     else if (mode == "loudness")
-        m_modeDesc->setText(jp("\xe3\x83\xa9\xe3\x82\xa6\xe3\x83\x89\xe3\x83\x8d\xe3\x82\xb9\xe6\xad\xa3\xe8\xa6\x8f\xe5\x8c\x96 / 4\xe5\x80\x8d\xe3\x82\xa2\xe3\x83\x83\xe3\x83\x97\xe3\x82\xb5\xe3\x83\xb3\xe3\x83\x97\xe3\x83\xaa\xe3\x83\xb3\xe3\x82\xb0"));
+        m_modeDesc->setText(QObject::tr("ラウドネス正規化 / 4倍アップサンプリング"));
 }
 
 void MainWindow::turnOffBitPerfect()
@@ -3430,7 +3745,7 @@ void MainWindow::onCdMetaReady(CdMetaFetcher::Result result)
     if (!m_isCdMode) return;
 
     if (!result.found) {
-        m_statusBar->setText(jp("\xe3\x83\xa1\xe3\x82\xbf\xe3\x83\x87\xe3\x83\xbc\xe3\x82\xbf\xe3\x81\xaa\xe3\x81\x97  >> Press Play to start"));
+        m_statusBar->setText(QObject::tr("メタデータなし  >> Press Play to start"));
         return;
     }
 
@@ -3493,93 +3808,24 @@ void MainWindow::showAbout()
 // ── フォルダ内の最初の音楽ファイルからタグ埋め込みアートを取得
 QPixmap MainWindow::findAlbumArt(const QString &folderPath, int size)
 {
-    static const QStringList audioExts = {
-        "*.mp3","*.flac","*.m4a","*.mp4","*.aac","*.wav","*.ogg","*.opus","*.dsf","*.dff",
-        "*.MP3","*.FLAC","*.M4A","*.MP4","*.AAC","*.WAV","*.OGG","*.OPUS","*.DSF","*.DFF"
+    // ★ v10: 再生中の曲と同じ順番で探す（AlbumArt：埋め込み → フォルダの画像 → ネット取得のキャッシュ）
+    auto fit = [size](const QPixmap &px) {
+        const QPixmap s = px.scaled(size, size, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+        return s.copy((s.width() - size) / 2, (s.height() - size) / 2, size, size);   // 中央を切り抜く
     };
-
-    // フォルダ内（サブフォルダも含む）の最初の音楽ファイルを探す
-    std::function<QString(const QString&, int)> findFirst = [&](const QString &dir, int depth) -> QString {
-        if (depth > 2) return {};
-        QDir d(dir);
-        d.setNameFilters(audioExts);
-        d.setFilter(QDir::Files | QDir::NoDotAndDotDot);
-        d.setSorting(QDir::Name);
-        auto files = d.entryInfoList();
-        if (!files.isEmpty()) return files.first().absoluteFilePath();
-        d.setNameFilters({});
-        d.setFilter(QDir::Dirs | QDir::NoDotAndDotDot);
-        d.setSorting(QDir::Name);
-        for (const auto &sub : d.entryInfoList()) {
-            QString f = findFirst(sub.absoluteFilePath(), depth + 1);
-            if (!f.isEmpty()) return f;
-        }
-        return {};
-    };
-
-    QString fp = findFirst(folderPath, 0);
-    if (fp.isEmpty()) return QPixmap();
-
-    QString ext = QFileInfo(fp).suffix().toLower();
-    QByteArray imgData;
-
-    auto toQByteArray = [](const TagLib::ByteVector &bv) {
-        return QByteArray(bv.data(), (int)bv.size());
-    };
-
-    if (ext == "mp3") {
-        TagLib::MPEG::File f(fp.toStdWString().c_str());
-        if (f.ID3v2Tag()) {
-            auto frames = f.ID3v2Tag()->frameListMap()["APIC"];
-            TagLib::ID3v2::AttachedPictureFrame *best = nullptr;
-            for (auto *fr : frames) {
-                auto *apic = dynamic_cast<TagLib::ID3v2::AttachedPictureFrame*>(fr);
-                if (!apic) continue;
-                if (apic->type() == TagLib::ID3v2::AttachedPictureFrame::FrontCover) { best = apic; break; }
-                if (!best) best = apic;
-            }
-            if (best) imgData = toQByteArray(best->picture());
-        }
-    } else if (ext == "flac") {
-        TagLib::FLAC::File f(fp.toStdWString().c_str());
-        TagLib::FLAC::Picture *best = nullptr;
-        for (auto *pic : f.pictureList()) {
-            if (pic->type() == TagLib::FLAC::Picture::FrontCover) { best = pic; break; }
-            if (!best) best = pic;
-        }
-        if (best) imgData = toQByteArray(best->data());
-    } else if (ext == "m4a" || ext == "mp4" || ext == "aac") {
-        TagLib::MP4::File f(fp.toStdWString().c_str());
-        if (f.tag()) {
-            auto items = f.tag()->itemMap();
-            if (items.contains("covr")) {
-                auto covers = items["covr"].toCoverArtList();
-                if (!covers.isEmpty()) imgData = toQByteArray(covers.front().data());
-            }
-        }
-    }
-
-    if (!imgData.isEmpty()) {
+    const QString first = AlbumArt::firstAudioIn(folderPath);
+    if (!first.isEmpty()) {
+        const QByteArray d = AlbumArt::embedded(first);
         QPixmap px;
-        if (px.loadFromData(imgData))
-            return px.scaled(size, size, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation)
-                     .copy(0, 0, size, size);
+        if (!d.isEmpty() && px.loadFromData(d)) return fit(px);
     }
-
-    // fallback: フォルダ内の画像ファイル
-    QDir dir(folderPath);
-    static const QStringList preferred = {"cover.jpg","folder.jpg","front.jpg","cover.png","folder.png"};
-    for (const QString &name : preferred) {
-        QPixmap px(dir.filePath(name));
-        if (!px.isNull())
-            return px.scaled(size, size, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation)
-                     .copy(0, 0, size, size);
-    }
-    for (const QString &f : dir.entryList({"*.jpg","*.jpeg","*.png"}, QDir::Files)) {
-        QPixmap px(dir.filePath(f));
-        if (!px.isNull())
-            return px.scaled(size, size, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation)
-                     .copy(0, 0, size, size);
+    QString img = AlbumArt::folderImage(folderPath);
+    // "Disc 1" のようなサブフォルダに曲がある場合は、そのフォルダの画像も見る
+    if (img.isEmpty() && !first.isEmpty()) img = AlbumArt::folderImage(QFileInfo(first).absolutePath());
+    if (img.isEmpty() && !first.isEmpty()) img = AlbumArt::cachedFor(first);
+    if (!img.isEmpty()) {
+        const QPixmap px(img);
+        if (!px.isNull()) return fit(px);
     }
     return QPixmap();
 }
@@ -3591,7 +3837,7 @@ void MainWindow::onBrowseAlbums()
     turnOffBitPerfect();
 
     QString root = QFileDialog::getExistingDirectory(
-        this, jp("\xe9\x9f\xb3\xe6\xa5\xbd\xe3\x83\xab\xe3\x83\xbc\xe3\x83\x88\xe3\x83\x95\xe3\x82\xa9\xe3\x83\xab\xe3\x83\x80\xe3\x82\x92\xe9\x81\xb8\xe6\x8a\x9e"),
+        this, QObject::tr("音楽ルートフォルダを選択"),
         m_currentFolder, QFileDialog::ShowDirsOnly);
     if (root.isEmpty()) return;
 
@@ -3619,11 +3865,11 @@ void MainWindow::setupAlbumBrowser()
     QHBoxLayout *hl = new QHBoxLayout(header);
     hl->setContentsMargins(14, 0, 10, 0);
     hl->setSpacing(8);
-    QLabel *titleLbl = new QLabel(jp("\xe3\x82\xa2\xe3\x83\xab\xe3\x83\x90\xe3\x83\xa0\xe4\xb8\x80\xe8\xa6\xa7"));
+    QLabel *titleLbl = new QLabel(QObject::tr("アルバム一覧"));
     titleLbl->setObjectName("albumHeaderLabel");
     m_albumPathLabel = new QLabel();
     m_albumPathLabel->setObjectName("albumPathLabel");
-    QPushButton *closeBtn = new QPushButton(jp("\xe2\x9c\x95 \xe9\x96\x89\xe3\x81\x98\xe3\x82\x8b"));
+    QPushButton *closeBtn = new QPushButton(QObject::tr("✕ 閉じる"));
     closeBtn->setObjectName("albumCloseBtn");
     closeBtn->setFixedHeight(22);
     connect(closeBtn, &QPushButton::clicked, [this]{
@@ -3644,7 +3890,7 @@ void MainWindow::setupAlbumBrowser()
     sl->setSpacing(0);
     m_albumSearchBox = new QLineEdit();
     m_albumSearchBox->setObjectName("albumSearchBox");
-    m_albumSearchBox->setPlaceholderText(jp("\xe3\x82\xa2\xe3\x83\xab\xe3\x83\x90\xe3\x83\xa0\xe5\x90\x8d\xe3\x83\xbb\xe3\x82\xa2\xe3\x83\xbc\xe3\x83\x86\xe3\x82\xa3\xe3\x82\xb9\xe3\x83\x88\xe5\x90\x8d\xe3\x81\xa7\xe6\xa4\x9c\xe7\xb4\xa2..."));
+    m_albumSearchBox->setPlaceholderText(QObject::tr("アルバム名・アーティスト名で検索..."));
     m_albumSearchBox->setClearButtonEnabled(true);
     connect(m_albumSearchBox, &QLineEdit::textChanged, this, &MainWindow::filterAlbumCards);
     sl->addWidget(m_albumSearchBox);
@@ -3792,7 +4038,7 @@ void MainWindow::populateAlbumBrowser(const QString &rootPath)
         if (trackCount == 0) { albumCount--; return; }
 
         // サブテキスト：曲数表示
-        QString subText = QString("%1 %2").arg(trackCount).arg(jp("\xe6\x9b\xb2"));
+        QString subText = QObject::tr("%1 曲").arg(trackCount);
         QWidget *card = new QWidget();
         card->setObjectName("albumCard");
         card->setCursor(Qt::PointingHandCursor);
@@ -3892,6 +4138,6 @@ void MainWindow::populateAlbumBrowser(const QString &rootPath)
     }
 
     m_albumFooterLabel->setText(
-        QString("%1 %2").arg(albumCount).arg(jp("\xe3\x82\xa2\xe3\x83\xab\xe3\x83\x90\xe3\x83\xa0 \xe2\x80\x94 \xe3\x82\xaf\xe3\x83\xaa\xe3\x83\x83\xe3\x82\xaf\xe3\x81\xa7\xe8\xaa\xad\xe3\x81\xbf\xe8\xbe\xbc\xe3\x82\x93\xe3\x81\xa7\xe5\x86\x8d\xe7\x94\x9f")));
+        QObject::tr("%1 アルバム — クリックで読み込んで再生").arg(albumCount));
 }
 

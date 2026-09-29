@@ -33,7 +33,7 @@ namespace {
 //   開けなければnullptr（呼び出し側でmpv経路／通常の再オープンにフォールバック）。
 //   ".ogg"は中身がVorbisとOpusの両方ありうるので、Vorbis→Opusの順に試す。
 static std::unique_ptr<IPcmDecoder> OpenDecoderFor(const std::wstring& filePath, const std::string& extLower,
-                                                   bool dop = false)
+                                                   bool dop = false, bool nativeDsd = false)
 {
     auto tryOpen = [&](std::unique_ptr<IPcmDecoder> d) -> std::unique_ptr<IPcmDecoder> {
         if (d && d->Open(filePath)) return d;
@@ -48,7 +48,10 @@ static std::unique_ptr<IPcmDecoder> OpenDecoderFor(const std::wstring& filePath,
                                                      return tryOpen(std::make_unique<MfPcmDecoder>());
     if (extLower == "opus")                          return tryOpen(std::make_unique<OpusPcmDecoder>());
     // DSD(DSF/DFF)はPCM(176.4k/192k)へ変換して出力
-    if (extLower == "dsf" || extLower == "dff")      return tryOpen(std::make_unique<DsdPcmDecoder>(dop));
+    if (extLower == "dsf" || extLower == "dff") {
+        if (nativeDsd) return tryOpen(std::unique_ptr<IPcmDecoder>(DsdPcmDecoder::CreateNative()));
+        return tryOpen(std::make_unique<DsdPcmDecoder>(dop));
+    }
     if (extLower == "ogg") {
         if (auto d = tryOpen(std::make_unique<OggVorbisPcmDecoder>())) return d;
         return tryOpen(std::make_unique<OpusPcmDecoder>());
@@ -63,9 +66,13 @@ bool PcmDualEngine::Open(const std::wstring& filePath, const std::string& extLow
     Close();
 
     m_isDop = false;
-    m_decoder = OpenDecoderFor(filePath, extLower, m_dopMode);
+    m_isNativeDsd = false;
+    m_decoder = OpenDecoderFor(filePath, extLower, m_dopMode, m_nativeDsdMode);
     if (!m_decoder) return false;
-    if (auto* dsd = dynamic_cast<DsdPcmDecoder*>(m_decoder.get())) m_isDop = dsd->IsDop(); // 未対応・開けない場合は呼び出し側でmpv経路にフォールバック
+    if (auto* dsd = dynamic_cast<DsdPcmDecoder*>(m_decoder.get())) {
+        m_isDop = dsd->IsDop();
+        m_isNativeDsd = dsd->IsNative();
+    } // 未対応・開けない場合は呼び出し側でmpv経路にフォールバック
 
     m_nativeSampleRate = m_decoder->GetSampleRate();
     m_outputSampleRate = m_nativeSampleRate; // SetTargetSampleRate()未呼び出しならネイティブのまま
@@ -114,6 +121,7 @@ void PcmDualEngine::Close() {
     CancelGapless();
     if (m_decoder) { m_decoder->Close(); m_decoder.reset(); }
     m_isDop = false;
+    m_isNativeDsd = false;
     if (m_ring) m_ring->Clear();
     m_nativeSampleRate = m_outputSampleRate = m_channels = m_bitsPerSample = 0;
     m_totalFrames = 0;

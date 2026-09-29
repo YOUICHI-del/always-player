@@ -38,6 +38,13 @@ public:
     //   この値はビット単位でそのままDACへ届ける必要がある（DSP・音量・
     //   リサンプル・16bit化は一切不可）。
     explicit DsdPcmDecoder(bool dop = false) : m_dop(dop) {}
+    // ★ v10: ネイティブDSD（ASIOのDSDモード用）。DSDのバイトを加工せずに出す。
+    //   1フレーム＝各チャンネル1バイト（DSD 8サンプル、MSBが古いサンプル）。
+    //   左詰めint32の上位8bitにバイトを置き、「有効データ」の印としてbit16を立てる
+    //   （値0は上位層のゼロ埋め＝無音の意味になり、出力側でDSDの無音0x69に置き換える）。
+    //   出力レート（フレーム/秒）＝DSDレート/8（DSD64→352800）。
+    static DsdPcmDecoder* CreateNative() { auto* d = new DsdPcmDecoder(false); d->m_native = true; return d; }
+    bool IsNative() const { return m_native; }
     ~DsdPcmDecoder() override { Close(); }
 
     bool Open(const std::wstring& filePath) override;
@@ -67,6 +74,8 @@ private:
     bool SeekToByte(uint64_t byteIndex);
 
     uint64_t  ReadFramesDop(int32_t* out, uint64_t frameCount);
+    uint64_t  ReadFramesNative(int32_t* out, uint64_t frameCount);
+    bool      m_native = false;      // v10: ネイティブDSD出力モード
 
     bool      m_dop = false;         // v10: DoP出力モード
     uint8_t   m_dopMarker = 0x05;    // v10: DoPマーカー（フレームごとに0x05/0xFAを交互）

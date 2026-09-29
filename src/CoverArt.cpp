@@ -46,7 +46,7 @@ QByteArray CoverArt::httpGet(const QString &urlStr)
 
     // MusicBrainz / Discogs は User-Agent 必須
     WinHttpAddRequestHeaders(hRequest,
-        L"User-Agent: AlwaysCDRipper/1.0 ( https://example.com )",
+        L"User-Agent: AlwaysPlayer/10.0 ( https://github.com/YOUICHI-del/always-player )",
         (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD);
 
     // リダイレクト自動追跡

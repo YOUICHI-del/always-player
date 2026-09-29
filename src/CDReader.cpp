@@ -43,7 +43,7 @@ void CDReader::stopReading()
 void CDReader::run()
 {
     if (!m_drive.open(m_driveLetter)) {
-        emit readError(QString("CDドライブを開けません: %1").arg(m_driveLetter));
+        emit readError(QObject::tr("CDドライブを開けません: %1").arg(m_driveLetter));
         return;
     }
 

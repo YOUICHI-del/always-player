@@ -119,6 +119,16 @@ bool DsdPcmDecoder::Open(const std::wstring& filePath) {
         return false;
     }
 
+    // ★ v10: ネイティブDSD。1チャンネルあたり1バイトで1フレーム（加工なし）。
+    if (m_native) {
+        if (m_dsdRate % 8 != 0) { Close(); return false; }
+        m_outRate     = m_dsdRate / 8;       // DSD64→352800、DSD128→705600、DSD256→1411200 …
+        m_totalFrames = m_bytesPerCh;
+        SeekToByte(0);
+        m_skipFrames = 0;
+        return true;
+    }
+
     // ★ v10: DoPモード。DSD 16bit(1チャンネルあたり2バイト)で1フレーム。
     //   フィルタは使わない（DSDのビット列をそのままDACへ届ける）。
     if (m_dop) {
@@ -344,8 +354,29 @@ uint64_t DsdPcmDecoder::ReadFramesDop(int32_t* out, uint64_t frameCount) {
     return produced;
 }
 
+// ★ v10: ネイティブDSD。各チャンネルのDSDバイトをそのまま上位8bitへ（bit16は有効データの印）。
+uint64_t DsdPcmDecoder::ReadFramesNative(int32_t* out, uint64_t frameCount) {
+    uint64_t produced = 0;
+    while (produced < frameCount) {
+        uint64_t need = frameCount - produced;
+        if (need > 65536) need = 65536;
+        const size_t got = ReadDsdBytes(static_cast<size_t>(need));
+        if (got == 0) break;                                 // EOF
+        for (size_t f = 0; f < got; ++f) {
+            for (int c = 0; c < 2; ++c) {
+                const uint32_t src = (m_channels == 1) ? 0u : static_cast<uint32_t>(c);
+                const uint32_t w = (static_cast<uint32_t>(m_chBytes[src][f]) << 24) | 0x00010000u;
+                out[(produced + f) * 2 + c] = static_cast<int32_t>(w);
+            }
+        }
+        produced += got;
+    }
+    return produced;
+}
+
 uint64_t DsdPcmDecoder::ReadFrames(int32_t* out, uint64_t frameCount) {
     if (!m_fp || frameCount == 0) return 0;
+    if (m_native) return ReadFramesNative(out, frameCount);
     if (m_dop) return ReadFramesDop(out, frameCount);
 
     const size_t nB = m_hB.size();
@@ -402,6 +433,11 @@ uint64_t DsdPcmDecoder::ReadFrames(int32_t* out, uint64_t frameCount) {
 bool DsdPcmDecoder::SeekToFrame(uint64_t frame) {
     if (!m_fp) return false;
     if (frame > m_totalFrames) frame = m_totalFrames;
+    if (m_native) {                   // v10: ネイティブDSDは1フレーム＝1バイト
+        SeekToByte(frame);
+        m_skipFrames = 0;
+        return true;
+    }
     if (m_dop) {                      // v10: DoPはバイト位置へ直接移動するだけ
         SeekToByte(frame * 2);
         m_skipFrames = 0;

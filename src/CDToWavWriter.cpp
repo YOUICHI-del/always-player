@@ -18,7 +18,7 @@ void CDToWavWriter::run()
 {
     QFile f(m_path);
     if (!f.open(QIODevice::WriteOnly)) {
-        emit writeError(QString("一時WAVを開けません: %1").arg(m_path));
+        emit writeError(QObject::tr("一時WAVを開けません: %1").arg(m_path));
         return;
     }
 
@@ -46,7 +46,7 @@ void CDToWavWriter::run()
 
         qint64 written = f.write(buf.constData(), static_cast<qint64>(got));
         if (written <= 0) {
-            emit writeError("WAV書き込みエラー");
+            emit writeError(QObject::tr("WAV書き込みエラー"));
             break;
         }
         m_totalBytes += written;

@@ -49,6 +49,10 @@ add_executable(Always WIN32
     src/CoverArt.cpp
     src/RemoteServer.h
     src/RemoteServer.cpp
+    src/ArtistTheater.h
+    src/ArtistTheater.cpp
+    src/AlbumArt.h
+    src/AlbumArt.cpp
     engine/IAudioOutputBackend.h
     engine/WasapiExclusiveOutput.h
     engine/WasapiExclusiveOutput.cpp
@@ -83,6 +87,10 @@ add_executable(Always WIN32
     engine/DspChain.cpp
     engine/AudioDeviceWatcher.h
     engine/AudioDeviceWatcher.cpp
+    # v10: ASIO出力（ASIO SDK 2.3.4 を GPLv3 で利用。ヘッダは third_party/asiosdk/common）
+    engine/AsioOutput.h
+    engine/AsioOutput.cpp
+    engine/AsioConvert.h
     engine/wavpack/common_utils.c
     engine/wavpack/decorr_utils.c
     engine/wavpack/entropy_utils.c
@@ -105,6 +113,7 @@ add_executable(Always WIN32
 target_include_directories(Always PRIVATE
     src
     engine
+    third_party/asiosdk/common
     engine/wavpack
     C:/vcpkg/installed/x64-windows/include
     C:/vcpkg/installed/x64-windows-static-md/include/opus
@@ -130,6 +139,15 @@ target_link_libraries(Always PRIVATE
     mfreadwrite.lib
     mfuuid.lib
     ole32.lib
+)
+# ★ v10: 表示言語（英語）。translations/always_en.ts をビルド時に .qm へ変換し、
+#   exeのリソース（:/i18n/always_en.qm）に埋め込む。文言を追加・変更したら
+#   「cmake --build out/build/x64-release --target update_translations」で .ts を更新できる。
+find_package(Qt6 REQUIRED COMPONENTS LinguistTools)
+qt_add_translations(Always
+    TS_FILES translations/always_en.ts
+    RESOURCE_PREFIX "/i18n"
+    NO_GENERATE_PLURALS_TS_FILE
 )
 target_compile_definitions(Always PRIVATE
     UNICODE _UNICODE

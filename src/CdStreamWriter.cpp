@@ -101,7 +101,7 @@ void CdStreamWriter::run()
         BOOL ok = WriteFile(m_hFile, buf, static_cast<DWORD>(got), &written, nullptr);
         if (!ok) {
             qDebug() << "[CdStreamWriter] WriteFile failed:" << GetLastError();
-            emit writeError("WAV書き込みエラー");
+            emit writeError(QObject::tr("WAV書き込みエラー"));
             break;
         }
         m_totalBytes.fetch_add(written);

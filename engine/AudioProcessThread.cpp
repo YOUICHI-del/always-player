@@ -33,6 +33,26 @@ void AudioProcessThread::ThreadProc() {
     std::vector<int32_t> s32Chunk(samplesPerChunk);
     std::vector<float> floatChunk;
 
+    // ★ v10.0.x: ノイズシェーピングの準備（DSP経路の最終段で使う）。
+    //   ・量子化先は出力機器と実際に合意した有効ビット数（16/24/32bit等）。
+    //     左詰めint32の下位ビットを0にした値を作るので、後段（WASAPI/ASIOの
+    //     コンテナ詰め直し）の切り捨てでは何も失われない。
+    //   ・TPDFディザ（±1LSBの三角分布）で量子化誤差を信号と無相関にし、
+    //     2次の誤差フィードバック NTF(z) = (1 − z^-1)^2 で可聴帯域の誤差を
+    //     高域（352.8kHz出力なら20kHz〜176.4kHz）へ押しやる。
+    //   ・誤差の状態はチャンネルごとに持ち、チャンク境界でも途切れない。
+    const int nsBits = std::clamp<int>(static_cast<int>(m_backend->GetValidBits()), 16, 32);
+    const double nsStep = std::ldexp(1.0, 32 - nsBits);           // 1LSBのint32上の大きさ
+    const double nsQMax = std::ldexp(1.0, nsBits - 1) - 1.0;      // LSB単位の最大値
+    const double nsQMin = -std::ldexp(1.0, nsBits - 1);           // LSB単位の最小値
+    double nsErr1[2] = {0.0, 0.0};   // e[n-1]
+    double nsErr2[2] = {0.0, 0.0};   // e[n-2]
+    uint32_t nsRng = 0x9E3779B9u;    // 軽量な線形合同法（RTに近いスレッドなのでロック・確保なし）
+    auto nsUniform = [&nsRng]() -> double {
+        nsRng = nsRng * 1664525u + 1013904223u;
+        return static_cast<double>(nsRng >> 8) * (1.0 / 16777216.0); // [0,1)
+    };
+
     // ★ s32Chunkに満タン分(samplesPerChunk)のデータが入っている前提で、
     //   ビットパーフェクト/DSP経路を通してWriteFrames()まで行う共通処理。
     //   最終端の端数フレームを出力する際も、末尾をゼロ埋めした上で
@@ -81,11 +101,35 @@ void AudioProcessThread::ThreadProc() {
             //   大きい曲での「バリバリ」の正体。テスト用の小さな正弦波では0dBに
             //   届かないため再現しなかった。doubleで計算・クリップしてから変換する。
             constexpr double kFullScaleD = 2147483647.0;
-            for (size_t i = 0; i < samplesPerChunk; ++i) {
-                double v = static_cast<double>(floatChunk[i]) * kFullScaleD * gain;
-                if (v >  kFullScaleD) v =  kFullScaleD;
-                if (v < -kFullScaleD) v = -kFullScaleD;
-                s32Chunk[i] = static_cast<int32_t>(v);
+            if (m_noiseShaping.load(std::memory_order_relaxed)) {
+                // ★ v10.0.x: TPDFディザ＋2次ノイズシェーピングで有効ビット数へ量子化
+                //   u[n] = x[n] − (2·e[n−1] − e[n−2])
+                //   y[n] = Q(u[n] + d[n])        d：TPDFディザ（±1LSB）
+                //   e[n] = y[n] − u[n]
+                //   → y[n] = x[n] + e[n] − 2e[n−1] + e[n−2] ＝ x + (1 − z^-1)^2·e
+                for (size_t i = 0; i < samplesPerChunk; ++i) {
+                    const int ch = static_cast<int>(i & 1);
+                    double x = static_cast<double>(floatChunk[i]) * kFullScaleD * gain / nsStep; // LSB単位
+                    if (x > nsQMax) x = nsQMax;
+                    if (x < nsQMin) x = nsQMin;
+                    const double u = x - (2.0 * nsErr1[ch] - nsErr2[ch]);
+                    const double d = nsUniform() - nsUniform();               // TPDF
+                    double q = std::floor(u + d + 0.5);
+                    if (q > nsQMax) q = nsQMax;
+                    if (q < nsQMin) q = nsQMin;
+                    // 誤差は通常±1.5LSB以内。クリップ時の暴走（発振）を防ぐため制限する
+                    const double e = std::clamp(q - u, -2.0, 2.0);
+                    nsErr2[ch] = nsErr1[ch];
+                    nsErr1[ch] = e;
+                    s32Chunk[i] = static_cast<int32_t>(static_cast<int64_t>(q) * static_cast<int64_t>(nsStep));
+                }
+            } else {
+                for (size_t i = 0; i < samplesPerChunk; ++i) {
+                    double v = static_cast<double>(floatChunk[i]) * kFullScaleD * gain;
+                    if (v >  kFullScaleD) v =  kFullScaleD;
+                    if (v < -kFullScaleD) v = -kFullScaleD;
+                    s32Chunk[i] = static_cast<int32_t>(v);
+                }
             }
             m_backend->WriteFrames(reinterpret_cast<const uint8_t*>(s32Chunk.data()),
                                     static_cast<uint32_t>(m_chunkFrames));

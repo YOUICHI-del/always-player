@@ -632,6 +632,9 @@ bool Player::tryPlayViaNewEngineImpl(const QString &filePath, bool dop, bool nat
     });
     // ★ v10: DoPは値を1bitも変えてはいけないので、DSP・音量を完全にバイパスする
     m_newEngineProcessThread->SetBitPerfect(m_dspOff || bitExact);
+    // ★ v10.0.x: 疑似DSD×8では、画面表示どおりノイズシェーピングを有効にする
+    //   （モード変更時は再オープンされるので、ここで設定すれば常に一致する）
+    m_newEngineProcessThread->SetNoiseShaping(m_mode == "dsd8" && !m_dspOff && !bitExact);
     m_newEngineProcessThread->SetGain(bitExact ? 1.0 : volumeToGain(m_volume)); // v10: 音量
     // ★ 真の終端（ギャップレスで次曲へ継続しない、本当のストリーム終端）でのみ、
     //   リングバッファに残った端数フレームをゼロ埋めして出力するための問い合わせ。

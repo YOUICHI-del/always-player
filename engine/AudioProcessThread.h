@@ -27,6 +27,10 @@ public:
     // ★ v10: 音量（リニア倍率 0.0〜1.0）。1.0のときは一切計算しない
     //   （ビットパーフェクトのまま素通し）。1.0未満のときだけ倍精度で掛ける。
     void SetGain(double gain) { m_gain.store(gain, std::memory_order_relaxed); }
+    // ★ v10.0.x: ノイズシェーピング（疑似DSD×8で有効）。DSP経路の最終段で、
+    //   出力機器の有効ビット数へTPDFディザ＋2次ノイズシェーピングで量子化する。
+    //   ビットパーフェクト経路では一切使わない（値を変えないため）。
+    void SetNoiseShaping(bool on) { m_noiseShaping.store(on, std::memory_order_relaxed); }
 
     void Start();
     void Stop();
@@ -42,6 +46,7 @@ private:
     EofQuery m_eofQuery;
     std::atomic<bool> m_bitPerfect{true};
     std::atomic<double> m_gain{1.0};
+    std::atomic<bool> m_noiseShaping{false};
     std::atomic<bool> m_running{false};
     std::thread m_thread;
 

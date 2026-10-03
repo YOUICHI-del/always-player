@@ -559,5 +559,19 @@ Please lower the volume on your DAC or amplifier before playing.</translation>
         <translation>Searches iTunes and MusicBrainz by artist and album name.
 Downloaded images are stored by the app. Your music files are never modified.</translation>
     </message>
+    <message>
+        <source>パソコン版Googleドライブのフォルダを選んで再生</source>
+        <translation>Choose a Google Drive for desktop folder and play</translation>
+    </message>
+    <message>
+        <source>パソコン版Googleドライブが見つかりませんでした。
+Googleの無料アプリ「パソコン版Googleドライブ」をインストールしてログインすると、Google Drive内の曲をAlways Playerで再生できます。</source>
+        <translation>Google Drive for desktop was not found.
+Install Google's free app "Google Drive for desktop" and sign in to play music stored in your Google Drive with Always Player.</translation>
+    </message>
+    <message>
+        <source>ダウンロードページを開く</source>
+        <translation>Open Download Page</translation>
+    </message>
 </context>
 </TS>

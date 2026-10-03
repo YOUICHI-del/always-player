@@ -1,6 +1,7 @@
 #include <QApplication>
 #include <windows.h>
 #include <cwchar>
+#include <cstring>
 #include "MainWindow.h"
 #include "IniFileLock.h"
 #include <QTranslator>
@@ -10,6 +11,15 @@ int main(int argc, char *argv[])
 {
     // 多重起動防止
     HANDLE mutex = CreateMutexA(nullptr, TRUE, "AlwaysPlayerMutex");
+    // ★ v10: 言語切り替えによる再起動(--restart)のときは、古いAlways Playerが
+    //   終了するのを最大10秒待ってから起動する(すぐ終了扱いにしない)。
+    bool restarting = false;
+    for (int i = 1; i < argc; ++i)
+        if (strcmp(argv[i], "--restart") == 0) restarting = true;
+    if (restarting && GetLastError() == ERROR_ALREADY_EXISTS) {
+        const DWORD w = WaitForSingleObject(mutex, 10000);
+        if (w == WAIT_OBJECT_0 || w == WAIT_ABANDONED) SetLastError(0);
+    }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         // ★ ウィンドウタイトルは「Always Player  v10.0.0  -  曲名」のように変わるため、
         //   完全一致のFindWindowでは見つからない。先頭が "Always Player" の

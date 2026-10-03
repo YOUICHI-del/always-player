@@ -38,6 +38,7 @@
 #include <QDebug>
 #include <QScrollArea>
 #include <QDesktopServices>
+#include <QUrl>
 #include <QRegularExpression>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -204,6 +205,27 @@ public:
 };
 
 static QString jp(const char *utf8) { return QString::fromUtf8(utf8); }
+
+// v10: 「パソコン版Googleドライブ」のドライブ(ボリューム名が "Google Drive")を探し、
+//   その中の「マイドライブ」(英語版Windowsでは "My Drive")の場所を返す。見つからなければ空。
+static QString findGoogleDriveRoot()
+{
+    const DWORD mask = GetLogicalDrives();
+    for (int i = 2; i < 26; ++i) {               // C: 〜 Z:
+        if (!(mask & (1u << i))) continue;
+        const wchar_t root[] = { wchar_t(L'A' + i), L':', L'\\', 0 };
+        wchar_t label[MAX_PATH + 1] = {};
+        if (!GetVolumeInformationW(root, label, MAX_PATH + 1, nullptr, nullptr, nullptr, nullptr, 0))
+            continue;
+        if (QString::fromWCharArray(label).compare(QLatin1String("Google Drive"), Qt::CaseInsensitive) != 0)
+            continue;
+        const QString base = QString::fromWCharArray(root);
+        for (const QString &sub : { QStringLiteral("マイドライブ"), QStringLiteral("My Drive") })
+            if (QDir(base + sub).exists()) return QDir::toNativeSeparators(base + sub);
+        return QDir::toNativeSeparators(base);
+    }
+    return {};
+}
 
 // ★ v10: 画面が英語表示かどうか（英語の翻訳が読み込まれていれば、この文言が英語に変わる）
 static bool uiIsEnglish()
@@ -1256,6 +1278,40 @@ void MainWindow::setupUI()
 
     m_bitPerfectBtn->setMenu(bpMenu);
     tbL->addWidget(m_bitPerfectBtn);
+
+    // ── v10: Google Drive。「パソコン版Googleドライブ」が作るドライブ（G:\マイドライブ 等）を
+    //   開くだけなので、Googleへの登録・ログイン処理は不要。曲の読み込みは通常のフォルダと同じ。
+    {
+        // 画面の小さいノートPCでもツールバーが切れないよう、雲マークだけにする（名前はツールチップで表示）
+        auto *driveBtn = new QPushButton(QStringLiteral("☁"));
+        driveBtn->setObjectName("toolBtn");
+        driveBtn->setAccessibleName(QStringLiteral("Google Drive"));
+        driveBtn->setToolTip(QStringLiteral("Google Drive  —  ") + QObject::tr("パソコン版Googleドライブのフォルダを選んで再生"));
+        connect(driveBtn, &QPushButton::clicked, this, [this]{
+            const QString root = findGoogleDriveRoot();
+            if (root.isEmpty()) {
+                QMessageBox box(this);
+                box.setWindowTitle(QStringLiteral("Always Player"));
+                box.setIcon(QMessageBox::Information);
+                box.setText(QObject::tr("パソコン版Googleドライブが見つかりませんでした。\n"
+                                        "Googleの無料アプリ「パソコン版Googleドライブ」をインストールしてログインすると、"
+                                        "Google Drive内の曲をAlways Playerで再生できます。"));
+                QPushButton *dl = box.addButton(QObject::tr("ダウンロードページを開く"), QMessageBox::AcceptRole);
+                box.addButton(QObject::tr("閉じる"), QMessageBox::RejectRole);
+                box.exec();
+                if (box.clickedButton() == dl)
+                    QDesktopServices::openUrl(QUrl(QStringLiteral("https://www.google.com/drive/download/")));
+                return;
+            }
+            // フォルダ選択の最初の場所をGoogle Driveにして、通常の「フォルダを選択して再生」を使う。
+            // キャンセルされたら、次回のフォルダ選択の最初の場所は元に戻す。
+            const QString prev = m_currentFolder;
+            m_currentFolder = root;
+            onSelectFolder();
+            if (m_currentFolder == root) m_currentFolder = prev;
+        });
+        tbL->addWidget(driveBtn);
+    }
 
     tbL->addStretch();
     tbL->addWidget(m_infoLabel);
@@ -3535,20 +3591,32 @@ void MainWindow::showSettings()
     svl->addWidget(cbWow);
     svl->addWidget(cbHall);
     svl->addStretch();
-    // ★ v10: 表示言語。初期値は「自動」＝Windowsの表示言語が日本語なら日本語、それ以外は英語。
-    //   言語の切り替えは次回起動時に反映する（起動時にmain.cppで翻訳を読み込むため）。
+    // ★ v10: 表示言語。Android版と同じく「自動 / 日本語 / English」の3択。
+    //   選ぶとその場でAlways Playerを再起動して切り替える（翻訳は起動時にmain.cppで読み込むため）。
+    //   どの言語で表示中でも見つけられるよう、見出しは日英併記で固定。
     {
+        auto *langBox = new QVBoxLayout();
+        langBox->setSpacing(2);
+        langBox->addWidget(new QLabel(QStringLiteral("言語 / Language")));
+        auto *langGroup = new QButtonGroup(dlg);
+        auto *rbAuto = new QRadioButton(QObject::tr("自動（Windowsの言語に合わせる）"));
+        auto *rbJa   = new QRadioButton(QStringLiteral("日本語"));
+        auto *rbEn   = new QRadioButton(QStringLiteral("English"));
+        rbAuto->setProperty("lang", QStringLiteral("auto"));
+        rbJa->setProperty("lang",   QStringLiteral("ja"));
+        rbEn->setProperty("lang",   QStringLiteral("en"));
         auto *langRow = new QHBoxLayout();
-        langRow->addWidget(new QLabel(QStringLiteral("言語 / Language")));
-        auto *cbLang = new QComboBox();
-        cbLang->addItem(QObject::tr("自動（Windowsの言語に合わせる）"), QStringLiteral("auto"));
-        cbLang->addItem(QStringLiteral("日本語"),  QStringLiteral("ja"));
-        cbLang->addItem(QStringLiteral("English"), QStringLiteral("en"));
+        for (QRadioButton *rb : {rbAuto, rbJa, rbEn}) {
+            langGroup->addButton(rb);
+            langRow->addWidget(rb);
+        }
+        langRow->addStretch();
         const QString curLang = iniReadValue(QStringLiteral("ui"), QStringLiteral("lang"));
-        const int idx = cbLang->findData(curLang.isEmpty() ? QStringLiteral("auto") : curLang);
-        cbLang->setCurrentIndex(idx >= 0 ? idx : 0);
-        langRow->addWidget(cbLang, 1);
-        svl->addLayout(langRow);
+        if (curLang == QLatin1String("ja"))      rbJa->setChecked(true);
+        else if (curLang == QLatin1String("en")) rbEn->setChecked(true);
+        else                                     rbAuto->setChecked(true);
+        langBox->addLayout(langRow);
+        svl->addLayout(langBox);
 
         // ★ v10: 出力方式（WASAPI排他 / ASIO）。ASIOはパソコンに登録されているメーカー製ドライバから選ぶ
         //   （ASIO4ALLなどWDMを包むタイプはPlayer::asioDrivers()の段階で除外済み）。
@@ -3593,10 +3661,27 @@ void MainWindow::showSettings()
                 if (!m_hasArtwork) requestOnlineCover(m_player->currentFilePath());
             }
         });
-        connect(cbLang, &QComboBox::activated, dlg, [dlg, cbLang](int) {
-            iniWriteValue(QStringLiteral("ui"), QStringLiteral("lang"), cbLang->currentData().toString());
-            QMessageBox::information(dlg, QStringLiteral("Always Player"),
-                QStringLiteral("次回起動時に反映されます。\nThe new language will be applied after restarting Always Player."));
+        connect(langGroup, &QButtonGroup::buttonClicked, dlg, [this, dlg, curLang](QAbstractButton *b) {
+            const QString lang = b->property("lang").toString();
+            const QString before = curLang.isEmpty() ? QStringLiteral("auto") : curLang;
+            if (lang == before) return;
+            iniWriteValue(QStringLiteral("ui"), QStringLiteral("lang"), lang);
+            // 再起動の確認。どちらの言語の人にも読めるよう日英併記。
+            const auto ans = QMessageBox::question(dlg, QStringLiteral("Always Player"),
+                QStringLiteral("表示言語を切り替えるため、Always Playerを再起動します。\n"
+                               "（再生中の曲は止まります）\n\n"
+                               "Always Player will restart to change the display language.\n"
+                               "(Playback will stop.)"),
+                QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Ok);
+            if (ans != QMessageBox::Ok) return;   // 設定は保存済み。次回起動時に反映される
+            // 新しいAlways Playerを「--restart」付きで起動してから自分を終了する。
+            // （新しい方は多重起動防止の判定で、この古い方が終わるのを待ってから立ち上がる）
+            if (!QProcess::startDetached(QCoreApplication::applicationFilePath(),
+                                         {QStringLiteral("--restart")})) return;
+            dlg->close();
+            m_player->stop();
+            saveFavorites();
+            QApplication::quit();
         });
     }
     connect(cbWow, &QCheckBox::clicked, this, [this, cbWow, cbHall](bool checked){
@@ -3683,7 +3768,7 @@ void MainWindow::showSettings()
     auto *aboutLabel = new QLabel(
         QString("Always Player v10.0.0  (build %1)<br>"
                 "High Fidelity PC Audio Player　　"
-                "(c) 2026 YOUICHI SAIJO  GPL-3.0<br><br>"
+                "(c) 2026 YOUICHI SAIJO -- GPL-3.0<br><br>"
                 "<a href='https://always-player.sakuraweb.com/' "
                 "style='color:#4db8ff;'>always-player.sakuraweb.com</a><br>")
         .arg(QString::fromLatin1(BUILD_TIMESTAMP)));
